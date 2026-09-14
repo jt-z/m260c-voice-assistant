@@ -22,11 +22,13 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 
 用法:
     <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”
-    <lerobot-python> voice_command_demo.py --ui               # 带实时界面(雷达/状态/日志/电平)
+    <lerobot-python> voice_command_demo.py --ui               # HUD 界面(Qt 优先, 无 PySide6 时用 Tk)
+    <lerobot-python> voice_command_demo.py --ui --ui-backend tk   # 强制用 Tkinter 界面
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
-    python3 sound_radar_ui.py 20                              # 只预览界面(模拟数据, 不连硬件)
+    python3 sound_radar_hud.py 30                             # 只预览 HUD(Qt, 模拟数据)
+    python3 sound_radar_ui.py 30                              # 只预览界面(Tk, 模拟数据)
 """
 import argparse
 import json
@@ -466,11 +468,75 @@ def run_live(args, rec):
             log_state("录音期间还有唤醒事件积压, 已丢弃; 请重新唤醒并用命令词", "warn")
 
 
+def ensure_x_display():
+    """启动 GUI 前的 X 环境检查(GUI 需要连上 X server):
+    1) 无 DISPLAY -> 明确报错(常见于 ssh 未 -X 或纯字符终端)
+    2) 有 DISPLAY 但无 XAUTHORITY -> 自动补上本机 gdm 的 Xauthority(常见坑)
+    3) X socket 不存在 -> 明确报错
+    返回 True 表示可以尝试启动 GUI"""
+    display = os.environ.get("DISPLAY", "")
+    if not display:
+        log("[错误] 未检测到 DISPLAY: 请在图形界面的终端里运行, 或 ssh -X 后再试")
+        return False
+    if not os.environ.get("XAUTHORITY"):
+        cand = "/run/user/%d/gdm/Xauthority" % os.getuid()
+        if os.path.exists(cand):
+            os.environ["XAUTHORITY"] = cand
+            log(f"[提示] 未设置 XAUTHORITY, 已自动使用 {cand}")
+    num = display.split(":")[-1].split(".")[0]
+    sock = "/tmp/.X11-unix/X%s" % num
+    if not os.path.exists(sock):
+        log(f"[错误] 找不到 X socket {sock}: DISPLAY={display} 可能无效")
+        return False
+    return True
+
+
+def _ensure_qt_libs():
+    """Qt6 的 xcb 平台插件依赖 libxcb-cursor.so.0.
+    若系统缺该库但本地兜底目录存在(~/.local/lib/qt-xcb), 则带上 LD_LIBRARY_PATH 重启自身
+    (LD_LIBRARY_PATH 必须在进程启动前生效, 运行中改 os.environ 无效).
+    系统装好 libxcb-cursor0 后本函数自动跳过."""
+    libdir = os.path.expanduser("~/.local/lib/qt-xcb")
+    if os.environ.get("_QT_XCB_FALLBACK") == "1" or not os.path.isdir(libdir):
+        return
+    import ctypes.util
+    if ctypes.util.find_library("xcb-cursor"):
+        return
+    env = dict(os.environ)
+    old = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = libdir + ((":" + old) if old else "")
+    env["_QT_XCB_FALLBACK"] = "1"
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
+
+
+def load_ui(backend="auto"):
+    """选择界面后端: Qt(PySide6, 观感最佳) 优先, 退化到 Tk. 返回 (类, 名字)"""
+    order = {"auto": ["qt", "tk"], "qt": ["qt"], "tk": ["tk"]}.get(backend, ["qt", "tk"])
+    for name in order:
+        try:
+            if name == "qt":
+                _ensure_qt_libs()
+                from sound_radar_hud import SoundRadarHUD as ui_cls
+            else:
+                from sound_radar_ui import SoundRadarUI as ui_cls
+            return ui_cls, name
+        except Exception as e:
+            log(f"[警告] 界面后端 {name} 不可用: {type(e).__name__}: {e}")
+    return None, None
+
+
 def run_with_ui(args, rec):
-    """界面模式: worker 线程跑主循环, 主线程跑 Tk(界面关闭即整体退出)"""
+    """界面模式: worker 线程跑主循环, 主线程跑 GUI(关窗即整体退出)"""
     global _ui
-    from sound_radar_ui import SoundRadarUI
-    _ui = SoundRadarUI()
+    if not ensure_x_display():
+        log("[错误] 当前环境无法显示图形界面, 退回无界面模式(日志照常输出)")
+        return run_live(args, rec)
+    ui_cls, backend = load_ui(getattr(args, "ui_backend", "auto"))
+    if ui_cls is None:
+        log("[错误] 没有可用的界面后端, 退回无界面模式")
+        return run_live(args, rec)
+    log(f"[界面] 后端 = {backend}")
+    _ui = ui_cls()
     _ui.on_close(lambda: _stop.set())
 
     worker = threading.Thread(target=run_live, args=(args, rec), daemon=True)
@@ -486,7 +552,9 @@ if __name__ == "__main__":
     ap.add_argument("--duration", type=int, default=3, help="唤醒后录音秒数(默认3)")
     ap.add_argument("--log-file", help="同时把日志写入该文件")
     ap.add_argument("--ui", action="store_true",
-                    help="打开实时界面(Tkinter): 环形角度雷达 + 状态提示 + 日志 + 电平条")
+                    help="打开实时界面: 环形角度雷达 + 状态提示 + 波形/频谱 + 日志")
+    ap.add_argument("--ui-backend", choices=["auto", "qt", "tk"], default="auto",
+                    help="界面后端: qt=PySide6(默认优先, 观感最佳), tk=Tkinter(零依赖), auto=自动")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
