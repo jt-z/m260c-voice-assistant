@@ -13,6 +13,9 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
     /home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
     模型: models/vosk-model-small-cn-0.22 (见 .gitignore 的 models 忽略项)
 
+当前板内唤醒词: 「小宽小宽」(xiao3 kuan1 xiao3 kuan1);
+改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
+
 用法:
     <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
@@ -37,6 +40,10 @@ from voice_interact_test import (ala_card_ids, find_angles, find_values,
 MODEL_DIR = os.path.join(PROJECT_DIR, "models", "vosk-model-small-cn-0.22")
 AUDIO_DIR = os.path.join(PROJECT_DIR, "audio")
 WAV_RATE = 16000
+# 当前板内唤醒词(2026-09 通过 voice_interact_test.py --set-wakeword 改为「小宽小宽」;
+# 出厂默认为「小微小微」= xiao3 wei1 xiao3 wei1)
+WAKE_WORD_TEXT = "小宽小宽"
+WAKE_WORD_PINYIN = "xiao3 kuan1 xiao3 kuan1"
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tif", ".tiff", ".svg")
 # 命令词表: Vosk 中文模型词表是按“字”的, 语法需按字用空格分隔, 只在这几句里挑最像的
 VOSK_GRAMMAR = ('["打 开 图 片", "打 开 照 片", "看 一 下 图 片", '
@@ -277,7 +284,8 @@ def run_live(args, rec):
     log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
     log(f"[串口] {mic.port} @115200")
     log(f"[识别] Vosk 本地离线识别(语法限制), 录音时长 {args.duration}s")
-    log_state("监听中：请先说唤醒词(默认「小微小微」), 再说命令词(如「打开图片」「关闭图片」)")
+    log_state(f"监听中：请先说唤醒词(当前「{WAKE_WORD_TEXT}」/ {WAKE_WORD_PINYIN}), "
+              f"再说命令词(如「打开图片」「关闭图片」)")
     log("=" * 60)
 
     last_ack_t = 0.0
@@ -304,7 +312,8 @@ def run_live(args, rec):
                     continue
                 stamp = tuple(find_values(obj, "start_ms"))    # 固件会重发同一唤醒
                 now = time.time()
-                if stamp and stamp in recent_wakes and now - recent_wakes[stamp] < 10:
+                if stamp and stamp in recent_wakes and now - recent_wakes[stamp] < 30:
+                    log_state("忽略重复唤醒事件(固件重发)")
                     continue
                 if stamp:
                     recent_wakes[stamp] = now
@@ -325,7 +334,7 @@ def run_live(args, rec):
             # 长时间无唤醒时的心跳, 提示程序仍在监听
             if time.time() - last_beat_t >= 60:
                 log_state(f"监听中…（已连续监听 {int(time.time() - listen_since)}s, "
-                          f"请说唤醒词「小微小微」）")
+                          f"请说唤醒词「{WAKE_WORD_TEXT}」）")
                 last_beat_t = time.time()
         except (OSError, SerialTimeoutError) as e:
             log(f"[警告] 串口异常({e}), 3 秒后重连...")
