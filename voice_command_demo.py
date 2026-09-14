@@ -88,10 +88,12 @@ _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 
 # ---- 咖啡任务(机械臂推理脚本) ----
 COFFEE_SCRIPT = "/home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh"
-COFFEE_TIMEOUT = 420      # 秒, 超时则发送中断(Ctrl+C 等价)让机械臂安全退出
+COFFEE_TIMEOUT = 120      # 秒, 超时则发送中断(Ctrl+C 等价)让机械臂安全退出
 COFFEE_STOP_KEYS = ("停止", "停下", "取消", "别做", "中断", "不要做")
-_coffee = {"proc": None, "start": 0.0, "stopped": False, "done": False}
+COFFEE_DONE_KEYS = ("做好了", "完成了", "做完", "结束吧", "可以了", "咖啡好了")
+_coffee = {"proc": None, "start": 0.0, "stopped": False, "finished": False, "done": False}
 _coffee_lock = threading.Lock()
+LEROBOT_SRC = "/home/kf/LX/pai0/lerobot/src"   # 用于探测按键后端是否可用(pynput)
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
 
@@ -186,6 +188,31 @@ def coffee_running() -> bool:
     return p.poll() is None
 
 
+def coffee_keys_available() -> bool:
+    """lerobot 的按键监听是否可用(需 pynput + X11): 可用则你按 n/q 有效"""
+    try:
+        if LEROBOT_SRC not in sys.path:
+            sys.path.insert(0, LEROBOT_SRC)
+        from lerobot.utils.keyboard_input import pynput_can_capture
+        return bool(pynput_can_capture())
+    except Exception:
+        return False
+
+
+def _coffee_send_key(key: str) -> bool:
+    """注入按键(与手动按同一个键): n=提前结束并正常收尾, q=立即停止.
+    走脚本自己的收尾逻辑, 比直接发信号更贴近日常操作; 失败则调用方回退 SIGINT"""
+    try:
+        from pynput import keyboard
+        ctrl = keyboard.Controller()
+        ctrl.press(key)
+        ctrl.release(key)
+        return True
+    except Exception as e:
+        log(f"[咖啡] 按键注入失败({type(e).__name__}: {e}), 改用 SIGINT")
+        return False
+
+
 def _coffee_interrupt(proc):
     """向脚本进程组发送 SIGINT(等价 Ctrl+C), 让机械臂安全退出"""
     try:
@@ -208,8 +235,22 @@ def make_coffee(*_ignored):
             return
         _coffee["proc"] = False          # 占位, 防止并发启动
         _coffee["stopped"] = False
+        _coffee["finished"] = False
         _coffee["done"] = False
     threading.Thread(target=_coffee_worker, daemon=True, name="coffee").start()
+
+
+def finish_coffee(*_ignored):
+    """语音「做好了/完成了」 -> 提前结束并正常收尾(等价按下 n 键)"""
+    with _coffee_lock:
+        proc = _coffee["proc"]
+        if not proc or proc is False or proc.poll() is not None:
+            log_state("当前没有正在执行的咖啡任务", "listen")
+            return
+        _coffee["finished"] = True
+    log_state("收到「做好了」指令 → 提前结束 episode 并正常收尾（等价按 n）", "done")
+    if not _coffee_send_key("n"):
+        _coffee_interrupt(proc)
 
 
 def _coffee_worker():
@@ -221,8 +262,22 @@ def _coffee_worker():
             _coffee["proc"] = None
         tts_speak("找不到咖啡脚本")
         return
-    log_state(f"咖啡任务：启动 {os.path.basename(script)}（预计 3~6 分钟）", "awake")
-    log("[咖啡] 提示：机械臂即将动作，请确保周边安全；说「停止」可中断")
+    log_state(f"咖啡任务：启动 {os.path.basename(script)}（预计 1~2 分钟）", "awake")
+    log("[咖啡] 提示：机械臂即将动作，请确保周边安全")
+    # 按键说明(lerobot 只有 n/r/q, 没有 d 键)
+    if coffee_keys_available():
+        log("[咖啡] 按键已启用(pynput 全局监听): n(或→)=提前结束并正常收尾, "
+            "q(或ESC)=立即停止; 也可对我说「做好了」/「停止」")
+        log("[咖啡] 注意: 是全局监听, 期间在别的窗口按到 n/q 也会被当作控制键")
+    else:
+        log("[咖啡] 按键不可用(需 pip install pynput 且 DISPLAY 可连): "
+            "请对我说「做好了」或「停止」来收尾")
+    # 子进程里的 pynput 需要能连上 X: 缺 XAUTHORITY 时自动补(否则按键监听会失败)
+    if os.environ.get("DISPLAY") and not os.environ.get("XAUTHORITY"):
+        cand = "/run/user/%d/gdm/Xauthority" % os.getuid()
+        if os.path.exists(cand):
+            os.environ["XAUTHORITY"] = cand
+            log(f"[咖啡] 已自动设置 XAUTHORITY={cand}(供按键监听使用)")
     # 预检查: 脚本需要 can0 已 UP; 未就绪时它会用 sudo 配置(需密码, 无人值守会失败)
     try:
         r = subprocess.run(["ip", "link", "show", "can0"], capture_output=True, text=True)
