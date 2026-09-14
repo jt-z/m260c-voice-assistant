@@ -7,7 +7,11 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 
 日志: 所有状态带时间戳实时输出, 常用状态提示:
       [状态] 监听中 / 已唤醒 / 识别中(带剩余秒数, 原地刷新) / 识别结果 / 已执行命令
+      [诊断] 每 30s 汇总收帧情况(握手帧/设备事件/唤醒/忽略), 用于判断"喊了没反应"
       可用 --log-file 把日志同时写入文件
+
+并发: 串口读取在独立线程(持续 ACK 握手 + 收事件), 业务线程只负责录音/识别/执行,
+      因此录音那几秒不再是"盲区"; 若录音期间又听到唤醒, 会明确提示并忽略.
 
 依赖(Vosk 已装在 lerobot conda 环境, 用该环境的 python 运行):
     /home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
@@ -27,6 +31,7 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 import argparse
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -36,7 +41,8 @@ import wave
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_DIR)
-from mic_serial import MicSerial, MSG_SHAKE, MSG_AIUI, SerialTimeoutError
+from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI,
+                        SerialTimeoutError, pretty_payload)
 from voice_interact_test import (ala_card_ids, find_angles, find_values,
                                  has_key, pulse_source_for_xfm)
 
@@ -62,6 +68,9 @@ _log_fp = None
 _last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
 _ui = None                # Tkinter 界面实例(--ui 时启用), 由 worker 线程经其队列更新
 _stop = threading.Event()  # 界面关闭/退出信号
+_wake_q = queue.Queue()    # 串口线程 -> 业务线程: (角度, beam, score)
+_busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确提示并忽略
+_stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
 
 def log(msg: str):
@@ -303,108 +312,153 @@ def _clear_line(shown: str):
 
 
 # ---------------------------------------------------------------- 主流程
-def run_live(args, rec):
-    """唤醒 -> 边录边识别 -> 执行命令"""
-    try:
-        mic = MicSerial(args.port).open() if args.port else None
-    except OSError as e:
-        log(f"[错误] 打开串口失败: {e}")
-        sys.exit(1)
-    if mic is None:
-        port, mic = MicSerial.autodetect(timeout=1.5)
+def serial_reader(args):
+    """独立线程: 持续读串口 -> ACK 握手 -> 解析唤醒事件入队; 掉线自动重连.
+    这样录音/识别期间也不会漏掉唤醒事件, 也不会停止握手确认造成链路"盲区"."""
+    last_ack = 0.0
+    last_stat = time.time()
+    last_stat_snap = dict(_stats)
+    recent_wakes = {}
+    mic = None
+
+    def _open():
+        """打开串口(自动识别或 --port)"""
+        if args.port:
+            return MicSerial(args.port).open()
+        port, m = MicSerial.autodetect(timeout=1.5)
         if not port:
-            log("[错误] 未找到降噪板串口")
-            sys.exit(1)
-        mic = mic or MicSerial(port).open()
+            raise SerialTimeoutError("未找到降噪板串口(检查 USB 连接)")
+        return m if m else MicSerial(port).open()
+
+    while not _stop.is_set():
+        if mic is None:
+            try:
+                mic = _open()
+                log(f"[串口线程] 已连接 {mic.port}")
+            except (OSError, SerialTimeoutError) as e:
+                log(f"[警告] 串口打开失败: {e}, 3 秒后重试")
+                time.sleep(3)
+                continue
+        try:
+            for typ, sid, payload in mic.read_frames(timeout=0.3):
+                if typ == MSG_SHAKE:
+                    _stats["shake"] += 1
+                    now = time.time()
+                    if now - last_ack >= 1.0:      # 节流确认, 防写缓冲积压
+                        mic.ack_handshake(typ, sid, payload)
+                        last_ack = now
+                    continue
+                if typ == MSG_AIUI:
+                    _stats["events"] += 1
+                    try:
+                        obj = json.loads(payload.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    angles = find_angles(obj)
+                    if not (has_key(obj, "ivw") or angles):
+                        # 非唤醒的设备事件(如开机 started / 版本), 仅作诊断打印
+                        log(f"[设备事件] {pretty_payload(typ, payload).replace(chr(10), ' ')}")
+                        continue
+                    stamp = tuple(find_values(obj, "start_ms"))
+                    now = time.time()
+                    if stamp and stamp in recent_wakes and now - recent_wakes[stamp] < 30:
+                        _stats["wake_dup"] += 1
+                        log_state("忽略重复唤醒事件(固件重发)", "listen")
+                        continue
+                    if stamp:
+                        recent_wakes = {k: t for k, t in recent_wakes.items()
+                                        if now - t < 120}
+                        recent_wakes[stamp] = now
+                    angle = sorted(set(angles))[0] if angles else None
+                    beams = find_values(obj, "beam")
+                    scores = find_values(obj, "score")
+                    if _busy.is_set():             # 正在录音/识别, 明确提示并忽略
+                        _stats["wake_busy"] += 1
+                        log_state(f"识别中又听到唤醒(角度 {angle}°), 本次忽略; "
+                                  f"如需重试请等提示后重新唤醒", "warn")
+                        continue
+                    _stats["wakes"] += 1
+                    _wake_q.put((angle,
+                                 beams[0] if beams else None,
+                                 scores[0] if scores else None))
+                else:
+                    _stats["other"] += 1
+                    log(f"[串口] 其它帧 type={hex(typ)} "
+                        f"载荷={payload.hex(' ')[:60]}")
+            # 诊断: 每 30s 汇总一次收帧情况(判断"没听到"是板子没报还是程序漏了)
+            if time.time() - last_stat >= 30:
+                d = {k: _stats[k] - last_stat_snap[k] for k in _stats}
+                log(f"[诊断] 近 {int(time.time() - last_stat)}s: "
+                    f"握手帧 {d['shake']} / 设备事件 {d['events']} / "
+                    f"唤醒 {d['wakes']} / 重复忽略 {d['wake_dup']} / "
+                    f"忙碌忽略 {d['wake_busy']} / 其它 {d['other']}")
+                last_stat = time.time()
+                last_stat_snap = dict(_stats)
+        except (OSError, SerialTimeoutError) as e:
+            log(f"[警告] 串口异常({e}), 重新连接...")
+            try:
+                mic.close()
+            except (OSError, AttributeError):
+                pass
+            mic = None
+            time.sleep(3)
+    if mic is not None:
+        try:
+            mic.close()
+        except OSError:
+            pass
+
+
+def run_live(args, rec):
+    """唤醒 -> 边录边识别 -> 执行命令(串口读取在独立线程, 录音期间不再有盲区)"""
     if not os.path.isdir(AUDIO_DIR):
         os.makedirs(AUDIO_DIR)
 
     log("=" * 60)
     log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
-    log(f"[串口] {mic.port} @115200")
     log(f"[识别] Vosk 本地离线识别(语法限制), 录音时长 {args.duration}s")
     log_state(f"监听中：请先说唤醒词(当前「{WAKE_WORD_TEXT}」/ {WAKE_WORD_PINYIN}), "
               f"再说命令词(如「打开图片」「关闭图片」)", "listen")
     log("=" * 60)
 
-    last_ack_t = 0.0
+    reader = threading.Thread(target=serial_reader, args=(args,), daemon=True)
+    reader.start()
+
     last_beat_t = time.time()
     listen_since = time.time()
-    recent_wakes = {}
     while not _stop.is_set():
         try:
-            for typ, sid, payload in mic.read_frames(timeout=0.5):
-                if typ == MSG_SHAKE:
-                    now = time.time()
-                    if now - last_ack_t >= 1.0:      # 握手确认节流, 防写缓冲积压
-                        mic.ack_handshake(typ, sid, payload)
-                        last_ack_t = now
-                    continue
-                if typ != MSG_AIUI:
-                    continue
-                try:
-                    obj = json.loads(payload.decode("utf-8", "replace"))
-                except Exception:
-                    continue
-                angles = find_angles(obj)
-                if not (has_key(obj, "ivw") or angles):
-                    continue
-                stamp = tuple(find_values(obj, "start_ms"))    # 固件会重发同一唤醒
-                now = time.time()
-                if stamp and stamp in recent_wakes and now - recent_wakes[stamp] < 30:
-                    log_state("忽略重复唤醒事件(固件重发)", "listen")
-                    continue
-                if stamp:
-                    recent_wakes[stamp] = now
-
-                angle = sorted(set(angles))[0] if angles else None
-                beams = find_values(obj, "beam")
-                scores = find_values(obj, "score")
-                if _ui and angle is not None:                  # 界面: 雷达指针+波束
-                    _ui.angle(angle,
-                              beams[0] if beams else None,
-                              scores[0] if scores else None)
-                log_state(f"已唤醒：声源角度 {angle if angle is not None else '未知'}° "
-                          f"→ 请说命令词(如「打开图片」)", "awake")
-                wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
-                text = stream_recognize(rec, args.duration, wav)
-                if not text:
-                    log_state("未识别到命令词，回到监听中", "listen")
-                elif dispatch(text):
-                    log_state("已执行命令，回到监听中", "done")
-                else:
-                    log_state("未匹配到命令，回到监听中", "listen")
-                last_beat_t = time.time()
-                listen_since = time.time()
-            # 长时间无唤醒时的心跳, 提示程序仍在监听
-            if time.time() - last_beat_t >= 60:
+            angle, beam, score = _wake_q.get(timeout=0.5)
+        except queue.Empty:
+            if time.time() - last_beat_t >= 60:      # 心跳: 提示仍在监听
                 log_state(f"监听中…（已连续监听 {int(time.time() - listen_since)}s, "
                           f"请说唤醒词「{WAKE_WORD_TEXT}」）", "listen")
                 last_beat_t = time.time()
-        except (OSError, SerialTimeoutError) as e:
-            log(f"[警告] 串口异常({e}), 3 秒后重连...")
-            time.sleep(3)
-            if _stop.is_set():
-                break
-            try:
-                mic.close()
-            except OSError:
-                pass
-            while not _stop.is_set():
-                try:
-                    port, mic = MicSerial.autodetect(timeout=1.5)
-                    mic = mic or MicSerial(port).open()
-                    break
-                except (OSError, SerialTimeoutError, TypeError):
-                    time.sleep(3)
-            last_ack_t = 0.0
-            last_beat_t = time.time()
-            listen_since = time.time()
-            log_state(f"重连成功({mic.port})，继续监听中", "listen")
-    try:
-        mic.close()
-    except OSError:
-        pass
+            continue
+
+        _busy.set()                                  # 进入录音/识别/执行
+        try:
+            if _ui and angle is not None:            # 界面: 雷达指针 + 波束高亮
+                _ui.angle(angle, beam, score)
+            log_state(f"已唤醒：声源角度 {angle if angle is not None else '未知'}° "
+                      f"→ 请说命令词(如「打开图片」)", "awake")
+            wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
+            text = stream_recognize(rec, args.duration, wav)
+            if not text:
+                log_state("未识别到命令词，回到监听中", "listen")
+            elif dispatch(text):
+                log_state("已执行命令，回到监听中", "done")
+            else:
+                log_state("未匹配到命令，回到监听中", "listen")
+        finally:
+            _busy.clear()
+        last_beat_t = time.time()
+        listen_since = time.time()
+        # 录音期间可能积压了唤醒, 让用户明确知道(不自动执行, 避免误触发)
+        if not _wake_q.empty():
+            while not _wake_q.empty():
+                _wake_q.get_nowait()
+            log_state("录音期间还有唤醒事件积压, 已丢弃; 请重新唤醒并用命令词", "warn")
 
 
 def run_with_ui(args, rec):
