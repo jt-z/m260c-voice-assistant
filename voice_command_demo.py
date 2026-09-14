@@ -21,12 +21,16 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
 
 用法:
-    <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”
+    <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”(默认混合识别)
     <lerobot-python> voice_command_demo.py --ui               # 打开实时 HUD 界面(PySide6)
+    <lerobot-python> voice_command_demo.py --asr vosk         # 只用 Vosk(轻量, 需 funasr 未装时)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
+    python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
+
+识别分工: Vosk 提供界面实时逐字(partial), SenseVoice 提供最终文本与命令判定.
 """
 import argparse
 import json
@@ -68,6 +72,7 @@ IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
 _log_fp = None
 _last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
 _ui = None                # HUD 界面实例(--ui 时启用), 由 worker 线程经其队列更新
+_sv = None                # SenseVoice 最终解码引擎(--asr hybrid 时启用)
 _capture = None           # 常开录音(环形预滚缓冲), 避免命令第一个字被切掉
 PRE_ROLL_SEC = 1.2        # 预滚时长: 唤醒瞬间回溯这段时间的音频
 _stop = threading.Event()  # 界面关闭/退出信号
@@ -282,7 +287,20 @@ def stream_recognize(rec, seconds: int, wav_path: str):
         _ui.level(0.0)
         _ui.partial("")
     # FinalResult 只含尾段, 需与已定稿分段拼接
-    text = "".join(segments) + parse_text(rec.FinalResult())
+    vosk_text = "".join(segments) + parse_text(rec.FinalResult())
+    text = vosk_text
+    if _sv is not None:                       # 最终解码交给 SenseVoice(更干净完整)
+        try:
+            t0 = time.time()
+            sv_text = _sv.decode(wav_path)
+            log(f"[识别] SenseVoice({(time.time()-t0)*1000:.0f}ms): "
+                f"{sv_text or '(空)'}")
+            if sv_text:
+                text = sv_text
+            else:
+                log("[识别] SenseVoice 无输出, 退回 Vosk 结果")
+        except Exception as e:
+            log(f"[警告] SenseVoice 解码失败({type(e).__name__}: {e}), 退回 Vosk 结果")
     log_state(f"识别结果：{text or '(无有效语音)'}", "result" if text else "warn")
     return text
 
@@ -427,7 +445,9 @@ def run_live(args, rec):
 
     log("=" * 60)
     log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
-    log(f"[识别] Vosk 本地离线识别(语法限制), 唤醒后采集 {args.duration}s")
+    log(f"[识别] 引擎: Vosk 实时逐字 + SenseVoice 最终解码"
+        if _sv is not None else "[识别] 引擎: Vosk(语法限制)")
+    log(f"[识别] 唤醒后采集 {args.duration}s")
     cmd, env, desc = build_stream_cmd(None)
     _capture = AudioCapture(cmd, env=env, pre_roll=PRE_ROLL_SEC,
                             on_chunk=_on_audio_chunk,
@@ -560,6 +580,8 @@ if __name__ == "__main__":
     ap.add_argument("--log-file", help="同时把日志写入该文件")
     ap.add_argument("--ui", action="store_true",
                     help="打开实时 HUD 界面(PySide6): 环形角度雷达 + 频谱瀑布图 + 状态提示 + 日志")
+    ap.add_argument("--asr", choices=["hybrid", "vosk"], default="hybrid",
+                    help="识别引擎: hybrid=Vosk 实时逐字 + SenseVoice 最终解码(推荐); vosk=仅 Vosk(轻量)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
@@ -568,6 +590,14 @@ if __name__ == "__main__":
     # Qt 的 xcb 兜底可能重启自身, 必须在加载模型之前完成, 否则模型会被加载两次
     if a.ui and not a.wav:
         _ensure_qt_libs()
+    if a.asr == "hybrid" and not a.wav:          # 最终解码引擎(加载约 1~2s)
+        try:
+            from asr_sensevoice import SenseVoice
+            log("[识别] 加载 SenseVoice 最终解码引擎…")
+            _sv = SenseVoice()
+            log("[识别] SenseVoice 就绪(CPU)")
+        except Exception as e:
+            log(f"[警告] SenseVoice 不可用({type(e).__name__}: {e}), 退回仅 Vosk 模式")
     rec = load_recognizer()
     if a.wav:
         recognize_wav(rec, a.wav)
