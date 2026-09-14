@@ -6,8 +6,8 @@ voice_command_demo.py —— 语音命令控制：
 链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> SenseVoice 中文识别
       -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开、按路径关闭图片)
 
-咖啡任务: 只负责把脚本拉起来并转发它的日志, 启动后就不再管它(不判完成/不超时/不主动中断);
-      脚本会按自己的 EPISODE_TIME 跑完, 想提前停请按 Ctrl+C 或 kill 脚本 PID(启动时会打印)。
+咖啡任务: 说“给我倒杯咖啡”会新开一个 gnome-terminal 窗口跑推理脚本, 日志在窗口里实时可见;
+      窗口里先按回车开始, 运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断。
 
 日志: 所有状态带时间戳实时输出, 常用状态提示:
       [状态] 监听中 / 已唤醒 / 识别中(带剩余秒数, 原地刷新) / 识别结果 / 已执行命令
@@ -45,6 +45,8 @@ import argparse
 import json
 import os
 import queue
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -90,10 +92,12 @@ _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确�
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 
 # ---- 咖啡任务(机械臂推理脚本) ----
-# 启动后就不管: 只负责把脚本拉起来并转发它的日志, 不判完成/不超时/不主动中断。
-# 脚本会一直按 EPISODE_TIME 跑到自己结束; 想提前停请手动终结脚本进程(启动时会打印 PID)。
+# 在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里按键提前终止
+# (运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断, 与手动跑脚本时完全一致)。
+# 本程序不干预脚本怎么结束; 窗口关闭后即可再次发起。
 COFFEE_SCRIPT = "/home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh"
-_coffee = {"proc": None}                  # 仅用于防止重复启动(两个进程会抢机械臂)
+COFFEE_TERM_TITLE = "咖啡任务(ACT 推理)"
+_coffee = {"proc": None}                  # gnome-terminal 进程(存活=窗口还开着), 防重复启动
 _coffee_lock = threading.Lock()
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
@@ -179,53 +183,50 @@ def close_image(*_ignored):
 
 
 def make_coffee(*_ignored):
-    """语音“给我倒杯咖啡/做咖啡” -> 后台拉起机械臂推理脚本, 之后就不再管它"""
+    """语音“给我倒杯咖啡/做咖啡” -> 在新的终端窗口里跑机械臂推理脚本"""
     with _coffee_lock:
         p = _coffee["proc"]
         if p is not None and p.poll() is None:
-            log_state("咖啡任务已在执行中，忽略本次指令", "warn")
-            threading.Thread(target=lambda: tts_speak("正在制作中，请稍候"),
-                             daemon=True).start()
+            log_state("咖啡终端窗口还开着，忽略本次指令（先关掉那个窗口再发起）", "warn")
+            tts_speak_async("正在制作中，请稍候")
             return
     threading.Thread(target=_coffee_launch, daemon=True, name="coffee").start()
 
 
+def _coffee_term_cmd(script: str) -> str:
+    """终端里要执行的 shell 命令: 跑脚本 -> 报告退出码 -> 停在提示上等回车关窗"""
+    return ("bash {s}; rc=$?; echo; "
+            "echo \"[咖啡] 脚本已结束，退出码 $rc\"; "
+            "read -r -p \"[咖啡] 按回车关闭本窗口 \" _").format(s=shlex.quote(script))
+
+
 def _coffee_launch():
-    """把脚本拉起来并转发它的输出; 拉起后本程序不再干预它怎么结束"""
+    """把脚本放进一个新终端窗口跑: 日志实时可见, 窗口里可直接按键提前终止"""
     script = COFFEE_SCRIPT
     if not os.path.exists(script):
         log(f"[咖啡] 脚本不存在: {script}")
         tts_speak("找不到咖啡脚本")
         return
-    log_state(f"咖啡任务：启动 {os.path.basename(script)}（预计 1~2 分钟）", "awake")
+    term = shutil.which("gnome-terminal")
+    if not term:
+        log("[咖啡] 未找到 gnome-terminal, 无法在终端窗口里显示")
+        tts_speak("找不到终端程序")
+        return
+    if not ensure_x_display():            # 弹终端窗口需要能连上 X(DISPLAY/XAUTHORITY)
+        log("[咖啡] 当前环境无法打开终端窗口, 咖啡任务未启动")
+        tts_speak("无法打开终端窗口")
+        return
+    log_state(f"咖啡任务：在新终端窗口里启动 {os.path.basename(script)}", "awake")
     log("[咖啡] 提示：机械臂即将动作，请确保周边安全")
-    log("[咖啡] 已撒手：只转发日志，不判完成/不超时/不主动中断；"
-        "想提前停就按 Ctrl+C 或 kill 脚本 PID")
-    # 脚本内的 pynput 按键监听(n=提前收尾, q=停止)需要能连上 X: 缺 XAUTHORITY 时补上
-    if os.environ.get("DISPLAY") and not os.environ.get("XAUTHORITY"):
-        cand = "/run/user/%d/gdm/Xauthority" % os.getuid()
-        if os.path.exists(cand):
-            os.environ["XAUTHORITY"] = cand
-            log(f"[咖啡] 已设置 XAUTHORITY={cand}(供脚本内按键监听使用)")
-    # 预检查: 脚本需要 can0 已 UP; 未就绪时它会用 sudo 配置(需密码, 无人值守会失败)
-    try:
-        r = subprocess.run(["ip", "link", "show", "can0"], capture_output=True, text=True)
-        if "state UP" not in r.stdout:
-            log("[咖啡] 警告: can0 未 UP, 脚本将需要 sudo 配置(可能要求密码而失败); "
-                "请先手动执行: sudo ip link set can0 type can bitrate 1000000 && "
-                "sudo ip link set can0 up")
-    except Exception:
-        pass
-    try:
-        tts_speak("好的，开始为你制作咖啡")
-    except Exception:
-        pass
+    log("[咖啡] 窗口里：先按回车开始推理；运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断")
+    log("[咖啡] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的结束")
+    tts_speak_async("好的，开始为你制作咖啡")     # 后台播报, 不拖慢窗口启动
 
     try:
-        proc = subprocess.Popen(["bash", script], cwd=os.path.dirname(script),
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1,
-                                start_new_session=True)
+        proc = subprocess.Popen(
+            [term, "--title=%s" % COFFEE_TERM_TITLE, "--wait",
+             "--", "bash", "-c", _coffee_term_cmd(script)],
+            cwd=os.path.dirname(script), start_new_session=True)
     except Exception as e:
         log(f"[咖啡] 启动失败: {type(e).__name__}: {e}")
         tts_speak("咖啡任务启动失败")
@@ -233,28 +234,16 @@ def _coffee_launch():
 
     with _coffee_lock:
         _coffee["proc"] = proc
-    log(f"[咖啡] 已启动，脚本 PID={proc.pid}（停止: kill {proc.pid}）")
-    try:                                  # 脚本里有 "按 ENTER 开始" 的确认, 自动回车
-        proc.stdin.write("\n")
-        proc.stdin.flush()
-    except Exception:
-        pass
-
-    try:                                  # 逐行转发脚本输出; 脚本自己结束后本线程随之退出
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                log(f"[咖啡] {line}")
-    except Exception:
-        pass
-    log(f"[咖啡] 脚本已自行结束（退出码 {proc.poll()}）")
+    log(f"[咖啡] 终端已打开（gnome-terminal PID={proc.pid}）")
+    rc = proc.wait()
     with _coffee_lock:
         _coffee["proc"] = None
+    log(f"[咖啡] 终端窗口已关闭（gnome-terminal 退出码 {rc}）")
 
 
 # 命令词 -> 动作; 顺序即优先级(“关闭”类必须先于“图片”, 否则含“图”会被打开命令截走)
 COMMANDS = [
-    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 后台拉起机械臂推理脚本
+    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 新终端窗口跑机械臂推理脚本
     (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
@@ -277,6 +266,16 @@ def tts_speak(text: str):
         from tts import speak as _speak
         _tts_speak = _speak
     return _tts_speak(text)
+
+
+def tts_speak_async(text: str):
+    """后台播报, 不阻塞调用方(合成/播放慢时也不拖住启动流程); 失败只记日志"""
+    def _run():
+        try:
+            tts_speak(text)
+        except Exception as e:
+            log(f"[警告] 提示播报失败: {type(e).__name__}: {e}")
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ---------------------------------------------------------------- Vosk 识别
@@ -734,7 +733,7 @@ if __name__ == "__main__":
     ap.add_argument("--fallback-say", default="暂时还处理不了",
                     help="命令无法处理时用 TTS 播报的提示语(留空则关闭兜底播报)")
     ap.add_argument("--coffee-script", default=COFFEE_SCRIPT,
-                    help="「给我倒杯咖啡」时执行的机械臂推理脚本(启动后本程序不再干预)")
+                    help="「给我倒杯咖啡」时在终端窗口里执行的机械臂推理脚本")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
