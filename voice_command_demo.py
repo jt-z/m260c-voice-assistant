@@ -254,6 +254,7 @@ def stream_recognize(rec, seconds: int, wav_path: str):
     t0 = time.time()
     pcm = bytearray()
     lock = threading.Lock()
+    print_lock = threading.Lock()            # 终端即时行会被两个线程刷新, 避免交错
     state = {"remain": seconds, "live": ""}
 
     def push_live(text):
@@ -264,7 +265,8 @@ def stream_recognize(rec, seconds: int, wav_path: str):
         line = f"[识别中] 剩余{state['remain']}s"
         if text:
             line += f" 「{text}」"
-        print("\r" + line, end="", flush=True)
+        with print_lock:
+            print("\r" + line, end="", flush=True)
 
     live_thread = None
     stop_live = threading.Event()
