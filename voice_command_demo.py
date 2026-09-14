@@ -479,6 +479,9 @@ def run_live(args, rec):
                 _wake_q.get_nowait()
             log_state("录音期间还有唤醒事件积压, 已丢弃; 请重新唤醒并用命令词", "warn")
 
+    if _capture:
+        _capture.stop()
+
 
 def ensure_x_display():
     """启动 GUI 前的 X 环境检查(GUI 需要连上 X server):
