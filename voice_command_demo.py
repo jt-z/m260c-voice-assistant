@@ -188,6 +188,20 @@ def coffee_running() -> bool:
     return p.poll() is None
 
 
+def _coffee_wait_proc(timeout: float = 3.0):
+    """等真实进程句柄就绪(跳过启动占位 False), 返回 Popen / None。
+    避免“受理后、Popen 就绪前”这 1 秒内说「停止」被当成“没有任务”。"""
+    deadline = time.time() + timeout
+    while True:
+        with _coffee_lock:
+            p = _coffee["proc"]
+        if p is not False:                 # None=没有任务; Popen=已就绪
+            return p
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.1)
+
+
 def coffee_keys_available() -> bool:
     """lerobot 的按键监听是否可用(需 pynput + X11): 可用则你按 n/q 有效"""
     try:
@@ -242,11 +256,11 @@ def make_coffee(*_ignored):
 
 def finish_coffee(*_ignored):
     """语音「做好了/完成了」 -> 提前结束并正常收尾(等价按下 n 键)"""
+    proc = _coffee_wait_proc()
+    if not proc or proc.poll() is not None:
+        log_state("当前没有正在执行的咖啡任务", "listen")
+        return
     with _coffee_lock:
-        proc = _coffee["proc"]
-        if not proc or proc is False or proc.poll() is not None:
-            log_state("当前没有正在执行的咖啡任务", "listen")
-            return
         _coffee["finished"] = True
     log_state("收到「做好了」指令 → 提前结束 episode 并正常收尾（等价按 n）", "done")
     if not _coffee_send_key("n"):
@@ -388,11 +402,11 @@ def _coffee_worker():
 
 def stop_coffee(*_ignored):
     """语音“停止/取消” -> 中断正在执行的咖啡任务"""
+    proc = _coffee_wait_proc()
+    if not proc or proc.poll() is not None:
+        log_state("当前没有正在执行的咖啡任务", "listen")
+        return
     with _coffee_lock:
-        proc = _coffee["proc"]
-        if not proc or proc is False or proc.poll() is not None:
-            log_state("当前没有正在执行的咖啡任务", "listen")
-            return
         _coffee["stopped"] = True
     log_state("收到停止指令，向机械臂发送中断（等价 Ctrl+C）", "warn")
     _coffee_interrupt(proc)
