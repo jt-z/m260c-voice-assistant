@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / “关闭图片”关闭 图片
+voice_command_demo.py —— 语音命令控制：
+    说“打开图片”打开 / “关闭图片”关闭 图片；说“给我倒杯咖啡”后台拉起机械臂推理脚本
 
-链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> Vosk 本地中文识别
+链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> SenseVoice 中文识别
       -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开、按路径关闭图片)
+
+咖啡任务: 只负责把脚本拉起来并转发它的日志, 启动后就不再管它(不判完成/不超时/不主动中断);
+      脚本会按自己的 EPISODE_TIME 跑完, 想提前停请按 Ctrl+C 或 kill 脚本 PID(启动时会打印)。
 
 日志: 所有状态带时间戳实时输出, 常用状态提示:
       [状态] 监听中 / 已唤醒 / 识别中(带剩余秒数, 原地刷新) / 识别结果 / 已执行命令
@@ -28,7 +32,6 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
-    <lerobot-python> voice_command_demo.py --coffee-timeout 420          # 咖啡任务超时(秒)
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
@@ -87,13 +90,11 @@ _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确�
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 
 # ---- 咖啡任务(机械臂推理脚本) ----
+# 启动后就不管: 只负责把脚本拉起来并转发它的日志, 不判完成/不超时/不主动中断。
+# 脚本会一直按 EPISODE_TIME 跑到自己结束; 想提前停请手动终结脚本进程(启动时会打印 PID)。
 COFFEE_SCRIPT = "/home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh"
-COFFEE_TIMEOUT = 120      # 秒, 超时则发送中断(Ctrl+C 等价)让机械臂安全退出
-COFFEE_STOP_KEYS = ("停止", "停下", "取消", "别做", "中断", "不要做")
-COFFEE_DONE_KEYS = ("做好了", "完成了", "做完", "结束吧", "可以了", "咖啡好了")
-_coffee = {"proc": None, "start": 0.0, "stopped": False, "finished": False, "done": False}
+_coffee = {"proc": None}                  # 仅用于防止重复启动(两个进程会抢机械臂)
 _coffee_lock = threading.Lock()
-LEROBOT_SRC = "/home/kf/LX/pai0/lerobot/src"   # 用于探测按键后端是否可用(pynput)
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
 
@@ -177,121 +178,35 @@ def close_image(*_ignored):
     _last_opened = None
 
 
-def coffee_running() -> bool:
-    """咖啡任务是否正在执行(含"已受理、正在启动"的占位窗口)"""
+def make_coffee(*_ignored):
+    """语音“给我倒杯咖啡/做咖啡” -> 后台拉起机械臂推理脚本, 之后就不再管它"""
     with _coffee_lock:
         p = _coffee["proc"]
-    if p is None:
-        return False
-    if p is False:                    # 占位: 已受理但 Popen 还没完成
-        return True
-    return p.poll() is None
-
-
-def _coffee_wait_proc(timeout: float = 3.0):
-    """等真实进程句柄就绪(跳过启动占位 False), 返回 Popen / None。
-    避免“受理后、Popen 就绪前”这 1 秒内说「停止」被当成“没有任务”。"""
-    deadline = time.time() + timeout
-    while True:
-        with _coffee_lock:
-            p = _coffee["proc"]
-        if p is not False:                 # None=没有任务; Popen=已就绪
-            return p
-        if time.time() >= deadline:
-            return None
-        time.sleep(0.1)
-
-
-def coffee_keys_available() -> bool:
-    """lerobot 的按键监听是否可用(需 pynput + X11): 可用则你按 n/q 有效"""
-    try:
-        if LEROBOT_SRC not in sys.path:
-            sys.path.insert(0, LEROBOT_SRC)
-        from lerobot.utils.keyboard_input import pynput_can_capture
-        return bool(pynput_can_capture())
-    except Exception:
-        return False
-
-
-def _coffee_send_key(key: str) -> bool:
-    """注入按键(与手动按同一个键): n=提前结束并正常收尾, q=立即停止.
-    走脚本自己的收尾逻辑, 比直接发信号更贴近日常操作; 失败则调用方回退 SIGINT"""
-    try:
-        from pynput import keyboard
-        ctrl = keyboard.Controller()
-        ctrl.press(key)
-        ctrl.release(key)
-        return True
-    except Exception as e:
-        log(f"[咖啡] 按键注入失败({type(e).__name__}: {e}), 改用 SIGINT")
-        return False
-
-
-def _coffee_interrupt(proc):
-    """向脚本进程组发送 SIGINT(等价 Ctrl+C), 让机械臂安全退出"""
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
-
-def make_coffee(*_ignored):
-    """语音“给我倒杯咖啡/做咖啡” -> 后台运行机械臂推理脚本(不阻塞语音交互)"""
-    with _coffee_lock:
-        if _coffee["proc"] is not None and _coffee["proc"] is not False \
-                and _coffee["proc"].poll() is None:
+        if p is not None and p.poll() is None:
             log_state("咖啡任务已在执行中，忽略本次指令", "warn")
             threading.Thread(target=lambda: tts_speak("正在制作中，请稍候"),
                              daemon=True).start()
             return
-        _coffee["proc"] = False          # 占位, 防止并发启动
-        _coffee["stopped"] = False
-        _coffee["finished"] = False
-        _coffee["done"] = False
-    threading.Thread(target=_coffee_worker, daemon=True, name="coffee").start()
+    threading.Thread(target=_coffee_launch, daemon=True, name="coffee").start()
 
 
-def finish_coffee(*_ignored):
-    """语音「做好了/完成了」 -> 提前结束并正常收尾(等价按下 n 键)"""
-    proc = _coffee_wait_proc()
-    if not proc or proc.poll() is not None:
-        log_state("当前没有正在执行的咖啡任务", "listen")
-        return
-    with _coffee_lock:
-        _coffee["finished"] = True
-    log_state("收到「做好了」指令 → 提前结束 episode 并正常收尾（等价按 n）", "done")
-    if not _coffee_send_key("n"):
-        _coffee_interrupt(proc)
-
-
-def _coffee_worker():
-    """后台执行咖啡任务: 转发输出 -> 日志; 完成/失败/超时/被停止 都播报"""
+def _coffee_launch():
+    """把脚本拉起来并转发它的输出; 拉起后本程序不再干预它怎么结束"""
     script = COFFEE_SCRIPT
     if not os.path.exists(script):
         log(f"[咖啡] 脚本不存在: {script}")
-        with _coffee_lock:
-            _coffee["proc"] = None
         tts_speak("找不到咖啡脚本")
         return
     log_state(f"咖啡任务：启动 {os.path.basename(script)}（预计 1~2 分钟）", "awake")
     log("[咖啡] 提示：机械臂即将动作，请确保周边安全")
-    # 按键说明(lerobot 只有 n/r/q, 没有 d 键)
-    if coffee_keys_available():
-        log("[咖啡] 按键已启用(pynput 全局监听): n(或→)=提前结束并正常收尾, "
-            "q(或ESC)=立即停止; 也可对我说「做好了」/「停止」")
-        log("[咖啡] 注意: 是全局监听, 期间在别的窗口按到 n/q 也会被当作控制键")
-    else:
-        log("[咖啡] 按键不可用(需 pip install pynput 且 DISPLAY 可连): "
-            "请对我说「做好了」或「停止」来收尾")
-    # 子进程里的 pynput 需要能连上 X: 缺 XAUTHORITY 时自动补(否则按键监听会失败)
+    log("[咖啡] 已撒手：只转发日志，不判完成/不超时/不主动中断；"
+        "想提前停就按 Ctrl+C 或 kill 脚本 PID")
+    # 脚本内的 pynput 按键监听(n=提前收尾, q=停止)需要能连上 X: 缺 XAUTHORITY 时补上
     if os.environ.get("DISPLAY") and not os.environ.get("XAUTHORITY"):
         cand = "/run/user/%d/gdm/Xauthority" % os.getuid()
         if os.path.exists(cand):
             os.environ["XAUTHORITY"] = cand
-            log(f"[咖啡] 已自动设置 XAUTHORITY={cand}(供按键监听使用)")
+            log(f"[咖啡] 已设置 XAUTHORITY={cand}(供脚本内按键监听使用)")
     # 预检查: 脚本需要 can0 已 UP; 未就绪时它会用 sudo 配置(需密码, 无人值守会失败)
     try:
         r = subprocess.run(["ip", "link", "show", "can0"], capture_output=True, text=True)
@@ -306,7 +221,6 @@ def _coffee_worker():
     except Exception:
         pass
 
-    proc = None
     try:
         proc = subprocess.Popen(["bash", script], cwd=os.path.dirname(script),
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -314,111 +228,33 @@ def _coffee_worker():
                                 start_new_session=True)
     except Exception as e:
         log(f"[咖啡] 启动失败: {type(e).__name__}: {e}")
-        with _coffee_lock:
-            _coffee["proc"] = None
         tts_speak("咖啡任务启动失败")
         return
 
     with _coffee_lock:
         _coffee["proc"] = proc
-        _coffee["start"] = time.time()
+    log(f"[咖啡] 已启动，脚本 PID={proc.pid}（停止: kill {proc.pid}）")
     try:                                  # 脚本里有 "按 ENTER 开始" 的确认, 自动回车
         proc.stdin.write("\n")
         proc.stdin.flush()
     except Exception:
         pass
 
-    def _reader():                        # 逐行转发脚本输出到日志
-        try:
-            for line in proc.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                if "推理完成" in line:
-                    with _coffee_lock:
-                        _coffee["done"] = True
+    try:                                  # 逐行转发脚本输出; 脚本自己结束后本线程随之退出
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
                 log(f"[咖啡] {line}")
-        except Exception:
-            pass
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-
-    t0 = time.time()
-    last_note = t0
-    timed_out = False
-    while True:
-        if proc.poll() is not None:        # 脚本结束
-            break
-        now = time.time()
-        if now - last_note >= 30:          # 每 30s 报一次进度, 避免以为卡死
-            log_state(f"咖啡制作中…已进行 {int(now - t0)}s", "recognize")
-            last_note = now
-        if now - t0 > COFFEE_TIMEOUT:      # 超时保护
-            timed_out = True
-            log_state(f"咖啡任务超时({COFFEE_TIMEOUT}s)，发送中断让机械臂安全退出", "warn")
-            _coffee_interrupt(proc)
-            for _ in range(40):            # 最多再等 20s 优雅退出
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.5)
-            if proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except Exception:
-                    pass
-            break
-        time.sleep(0.5)
-
-    rc = proc.poll()
-    reader.join(timeout=2)
+    except Exception:
+        pass
+    log(f"[咖啡] 脚本已自行结束（退出码 {proc.poll()}）")
     with _coffee_lock:
-        stopped = _coffee["stopped"]
-        finished = _coffee["finished"]
-        done_marker = _coffee["done"]
         _coffee["proc"] = None
-    dur = int(time.time() - t0)
-    # 收尾判定优先级: 手动停止 > 提前收尾(做好了/按n) > 超时 > 脚本正常结束 > 信号结束 > 失败
-    if stopped:
-        log_state(f"咖啡任务已被停止（用时 {dur}s，退出码 {rc}）", "warn")
-        tts_speak("已停止咖啡任务")
-    elif finished:
-        log_state(f"咖啡任务已提前收尾（说「做好了」/按 n，用时 {dur}s，退出码 {rc}）", "done")
-        tts_speak("咖啡做好了")
-    elif timed_out:
-        log_state(f"咖啡任务超时结束（用时 {dur}s，已发送中断安全退出）", "warn")
-        tts_speak("咖啡任务超时，已停止")
-    elif rc == 0 or done_marker:
-        log_state(f"咖啡任务完成（用时 {dur}s）", "done")
-        tts_speak("咖啡做好了")
-    elif rc in (130, 143) or rc is None:
-        # 130=SIGINT(等价 Ctrl+C), 143=SIGTERM: 属于手动结束, 不是失败
-        log_state(f"咖啡任务已手动结束（被信号终止，退出码 {rc}，用时 {dur}s）", "warn")
-        tts_speak("咖啡任务已结束")
-    else:
-        log_state(f"咖啡任务失败（退出码 {rc}，用时 {dur}s），请看日志", "warn")
-        tts_speak("咖啡任务失败，请查看日志")
 
 
-def stop_coffee(*_ignored):
-    """语音“停止/取消” -> 中断正在执行的咖啡任务"""
-    proc = _coffee_wait_proc()
-    if not proc or proc.poll() is not None:
-        log_state("当前没有正在执行的咖啡任务", "listen")
-        return
-    with _coffee_lock:
-        _coffee["stopped"] = True
-    log_state("收到停止指令，向机械臂发送中断（等价 Ctrl+C）", "warn")
-    _coffee_interrupt(proc)
-
-
-# 命令词 -> 动作; 顺序即优先级
-#   1) 收尾类必须先判: “咖啡好了”含“咖啡”, 若 make_coffee 在前会被截走
-#   2) “关闭”类必须先于“图片”, 否则含“图”会被打开命令截走
+# 命令词 -> 动作; 顺序即优先级(“关闭”类必须先于“图片”, 否则含“图”会被打开命令截走)
 COMMANDS = [
-    (COFFEE_DONE_KEYS, finish_coffee),            # 做好了 -> 提前结束并正常收尾(等价按 n)
-    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 跑机械臂推理脚本
-    (COFFEE_STOP_KEYS, stop_coffee),              # 停止/取消 -> 中断(等价 Ctrl+C)
+    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 后台拉起机械臂推理脚本
     (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
@@ -786,13 +622,7 @@ def run_live(args, rec):
                       f"→ 请说命令词(如「打开图片」)", "awake")
             wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
             text = stream_recognize(rec, args.duration, wav)
-            if text and coffee_running() and not any(
-                    k in text for k in COFFEE_STOP_KEYS + COFFEE_DONE_KEYS):
-                # 咖啡任务(机械臂在动作)期间只放行“停止 / 做好了”两类收尾指令,
-                # 其它命令一律忽略, 避免误触发别的动作
-                log_state(f"咖啡任务进行中，忽略命令: {text}"
-                          f"（说「做好了」收尾 或「停止」中断）", "warn")
-            elif text and dispatch(text):
+            if text and dispatch(text):
                 log_state("已执行命令，回到监听中", "done")
             else:
                 # 兜底: 没听懂/无法处理的命令 -> 用 TTS 播报提示
@@ -904,13 +734,11 @@ if __name__ == "__main__":
     ap.add_argument("--fallback-say", default="暂时还处理不了",
                     help="命令无法处理时用 TTS 播报的提示语(留空则关闭兜底播报)")
     ap.add_argument("--coffee-script", default=COFFEE_SCRIPT,
-                    help="「给我倒杯咖啡」时执行的机械臂推理脚本")
-    ap.add_argument("--coffee-timeout", type=int, default=COFFEE_TIMEOUT,
-                    help=f"咖啡任务超时秒数(默认{COFFEE_TIMEOUT}s), 超时发送中断安全退出")
+                    help="「给我倒杯咖啡」时执行的机械臂推理脚本(启动后本程序不再干预)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
-    COFFEE_SCRIPT, COFFEE_TIMEOUT = a.coffee_script, a.coffee_timeout
+    COFFEE_SCRIPT = a.coffee_script
 
     if a.log_file:
         _log_fp = open(a.log_file, "a", encoding="utf-8")
