@@ -36,6 +36,36 @@ SYNTH_ATTEMPTS = 3         # 合成尝试次数(edge-tts 走网络, 抖动很常
 SYNTH_TIMEOUT = 15.0       # 单次合成的超时(秒), 超时即重试
 
 
+def _ffmpeg_exe() -> str:
+    """优先用系统 ffmpeg(/usr/bin/ffmpeg)。
+    conda/工具链的 PATH 里可能藏着一些裁剪过的 ffmpeg 构建, 它们会报
+    "Unknown input format: 'mp3'"(缺 mp3 demuxer), 所以别只依赖 PATH。"""
+    for p in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    return "ffmpeg"                      # 系统没有就回退 PATH
+
+
+def _ffmpeg_env() -> dict:
+    """去掉可能劫持 ffmpeg 动态库的环境变量(某些 conda/工具链会污染它们)"""
+    env = dict(os.environ)
+    for k in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        env.pop(k, None)
+    return env
+
+
+def _looks_like_mp3(path: str) -> bool:
+    """粗查 MP3 头(帧同步 0xFF Ex 或 ID3 标签), 用来尽早发现 edge-tts 写出的非音频数据"""
+    try:
+        with open(path, "rb") as fp:
+            head = fp.read(3)
+    except OSError:
+        return False
+    if head[:3] == b"ID3":
+        return True
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+
+
 def _synth_edge(text: str, voice: str, out_wav: str) -> bool:
     """edge-tts 合成 mp3, 再用 ffmpeg 转成 44.1k 立体声 WAV(与音箱 sink 匹配)。
     网络不稳时重试 SYNTH_ATTEMPTS 次, 每次间隔递增; 全部失败返回 False。"""
@@ -52,11 +82,22 @@ def _synth_edge(text: str, voice: str, out_wav: str) -> bool:
             asyncio.run(_run())
             if not os.path.exists(tmp_mp3) or os.path.getsize(tmp_mp3) < 500:
                 raise RuntimeError("合成结果为空")
-            r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_mp3,
+            if not _looks_like_mp3(tmp_mp3):
+                raise RuntimeError("edge-tts 写出的不是 MP3 数据(前 3 字节异常, 大小 %d)"
+                                   % os.path.getsize(tmp_mp3))
+            r = subprocess.run([_ffmpeg_exe(), "-y", "-loglevel", "error",
+                                "-i", tmp_mp3,
                                 "-ar", "44100", "-ac", "2", out_wav],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=_ffmpeg_env())
             if r.returncode != 0 or not os.path.exists(out_wav):
-                raise RuntimeError("ffmpeg 转码失败 rc=%s" % r.returncode)
+                if os.path.exists(out_wav):        # 别把半成品 wav 留在缓存里
+                    try:
+                        os.remove(out_wav)
+                    except OSError:
+                        pass
+                raise RuntimeError("ffmpeg 转码失败 rc=%s: %s"
+                                   % (r.returncode,
+                                      (r.stderr or "").strip()[-300:] or "(ffmpeg 无 stderr 输出)"))
             return True
         except Exception as e:
             if attempt < SYNTH_ATTEMPTS:

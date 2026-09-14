@@ -305,9 +305,12 @@ def ask_llm_and_speak(text: str) -> bool:
         return False
     log_state(f"DeepSeek 回复（{time.time() - t0:.1f}s）：{reply}", "result")
     try:
-        tts_speak(reply)
+        ok, how = tts_speak(reply)        # 返回 (是否成功, 用的方式), 合成失败不会抛异常
     except Exception as e:
-        log(f"[警告] 回复播报失败: {type(e).__name__}: {e}")
+        log_state(f"回复播报异常({type(e).__name__}: {e})，只有文字", "warn")
+        return False
+    if not ok:
+        log_state(f"回复合成/播放失败({how})，只显示文字没出声", "warn")
         return False
     return True
 
