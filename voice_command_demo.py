@@ -360,18 +360,27 @@ def _coffee_worker():
     reader.join(timeout=2)
     with _coffee_lock:
         stopped = _coffee["stopped"]
+        finished = _coffee["finished"]
         done_marker = _coffee["done"]
         _coffee["proc"] = None
     dur = int(time.time() - t0)
+    # 收尾判定优先级: 手动停止 > 提前收尾(做好了/按n) > 超时 > 脚本正常结束 > 信号结束 > 失败
     if stopped:
         log_state(f"咖啡任务已被停止（用时 {dur}s，退出码 {rc}）", "warn")
         tts_speak("已停止咖啡任务")
+    elif finished:
+        log_state(f"咖啡任务已提前收尾（说「做好了」/按 n，用时 {dur}s，退出码 {rc}）", "done")
+        tts_speak("咖啡做好了")
     elif timed_out:
-        log_state(f"咖啡任务超时结束（用时 {dur}s）", "warn")
+        log_state(f"咖啡任务超时结束（用时 {dur}s，已发送中断安全退出）", "warn")
         tts_speak("咖啡任务超时，已停止")
     elif rc == 0 or done_marker:
         log_state(f"咖啡任务完成（用时 {dur}s）", "done")
         tts_speak("咖啡做好了")
+    elif rc in (130, 143) or rc is None:
+        # 130=SIGINT(等价 Ctrl+C), 143=SIGTERM: 属于手动结束, 不是失败
+        log_state(f"咖啡任务已手动结束（被信号终止，退出码 {rc}，用时 {dur}s）", "warn")
+        tts_speak("咖啡任务已结束")
     else:
         log_state(f"咖啡任务失败（退出码 {rc}，用时 {dur}s），请看日志", "warn")
         tts_speak("咖啡任务失败，请查看日志")
@@ -389,10 +398,13 @@ def stop_coffee(*_ignored):
     _coffee_interrupt(proc)
 
 
-# 命令词 -> 动作; 顺序即优先级(“关闭”类必须先判, 否则含“图”会被打开命令截走)
+# 命令词 -> 动作; 顺序即优先级
+#   1) 收尾类必须先判: “咖啡好了”含“咖啡”, 若 make_coffee 在前会被截走
+#   2) “关闭”类必须先于“图片”, 否则含“图”会被打开命令截走
 COMMANDS = [
+    (COFFEE_DONE_KEYS, finish_coffee),            # 做好了 -> 提前结束并正常收尾(等价按 n)
     (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 跑机械臂推理脚本
-    (("停止", "停下", "取消", "别做", "中断"), stop_coffee),
+    (COFFEE_STOP_KEYS, stop_coffee),              # 停止/取消 -> 中断(等价 Ctrl+C)
     (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
@@ -760,9 +772,12 @@ def run_live(args, rec):
                       f"→ 请说命令词(如「打开图片」)", "awake")
             wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
             text = stream_recognize(rec, args.duration, wav)
-            if text and coffee_running() and not any(k in text for k in COFFEE_STOP_KEYS):
-                # 咖啡任务(机械臂在动作)期间只允许"停止"类指令, 避免误触发其它动作
-                log_state(f"咖啡任务进行中，忽略命令: {text}（说「停止」可中断）", "warn")
+            if text and coffee_running() and not any(
+                    k in text for k in COFFEE_STOP_KEYS + COFFEE_DONE_KEYS):
+                # 咖啡任务(机械臂在动作)期间只放行“停止 / 做好了”两类收尾指令,
+                # 其它命令一律忽略, 避免误触发别的动作
+                log_state(f"咖啡任务进行中，忽略命令: {text}"
+                          f"（说「做好了」收尾 或「停止」中断）", "warn")
             elif text and dispatch(text):
                 log_state("已执行命令，回到监听中", "done")
             else:
