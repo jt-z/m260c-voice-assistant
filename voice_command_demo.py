@@ -95,7 +95,7 @@ _stop = threading.Event()  # 界面关闭/退出信号
 _wake_q = queue.Queue()    # 串口线程 -> 业务线程: (角度, beam, score)
 _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确提示并忽略
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
-_tts_lock = threading.Lock()   # 播报串行化: 防止两段语音同时播放叠在一起
+LLM_ACK_TEXT = "我想想"    # 交给大模型前的等待提示(启动时预热, 尽量秒出声)
 
 # ---- 咖啡任务(机械臂推理脚本) ----
 # 在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里按键提前终止
@@ -266,13 +266,13 @@ def dispatch(text: str):
 
 
 def tts_speak(text: str):
-    """懒加载 TTS 并播报(首次在线合成后缓存, 之后离线可播)"""
+    """懒加载 TTS 并播报(首次在线合成后缓存, 之后离线可播)。
+    并发保护在 tts.speak 内部(只锁播放), 所以这里不需要再加锁。"""
     global _tts_speak
     if _tts_speak is None:
         from tts import speak as _speak
         _tts_speak = _speak
-    with _tts_lock:            # 串行化播报, 避免两段语音叠在一起(如"我想想"和回复)
-        return _tts_speak(text)
+    return _tts_speak(text)
 
 
 def tts_speak_async(text: str):
@@ -296,7 +296,7 @@ def ask_llm_and_speak(text: str) -> bool:
         log("[大模型] 未配置 key, 桩模式(只回固定话术) —— "
             "设置 DEEPSEEK_API_KEY 或写 .deepseek_key 即可接真模型")
     log_state(f"命令词没匹配上，交给 DeepSeek：{text}", "recognize")
-    tts_speak_async("我想想")                 # 先给个反馈, 与请求并行
+    tts_speak_async(LLM_ACK_TEXT)             # 先给个反馈, 与请求并行
     t0 = time.time()
     try:
         reply = ask(text)
@@ -793,13 +793,17 @@ if __name__ == "__main__":
             log(f"[警告] SenseVoice 不可用({type(e).__name__}: {e}), 退回 Vosk 模式")
             a.asr = "vosk"
     rec = load_recognizer() if a.asr == "vosk" else None
-    if a.fallback_say and not a.wav:             # 预热兜底提示音(后台合成, 不阻塞启动)
+    if a.fallback_say and not a.wav:             # 预热提示音(后台合成, 不阻塞启动)
         def _prewarm():
             try:
                 from tts import prewarm
-                ok = prewarm(a.fallback_say)
-                log(f"[TTS] 兜底提示音{'已就绪' if ok else '预热失败(将在首次使用时合成)'}: "
-                    f"「{a.fallback_say}」")
+                items = [a.fallback_say]
+                if a.llm:
+                    items.append(LLM_ACK_TEXT)     # 大模型等待提示, 预热后能立刻出声
+                for text in items:
+                    ok = prewarm(text)
+                    log(f"[TTS] 提示音{'已就绪' if ok else '预热失败(将在首次使用时合成)'}: "
+                        f"「{text}」")
             except Exception as e:
                 log(f"[警告] TTS 预热失败: {type(e).__name__}: {e}")
         threading.Thread(target=_prewarm, daemon=True).start()

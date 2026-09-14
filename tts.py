@@ -16,6 +16,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
 import time
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +81,10 @@ def _play(wav: str) -> bool:
     return False
 
 
+# 只串行化"播放"这一步: 合成可以并行(省时间), 但两段语音绝不能同时念出来.
+_play_lock = threading.Lock()
+
+
 def prewarm(text: str, voice: str = DEFAULT_VOICE) -> bool:
     """只合成不播放(用于启动预热): 命中缓存则直接返回 True"""
     if not text.strip():
@@ -104,7 +109,8 @@ def speak(text: str, voice: str = DEFAULT_VOICE, quiet: bool = False):
                 print(f"[TTS] 合成失败, 跳过本次播报: {text}")
             return False, "合成失败"
 
-    ok = _play(wav)
+    with _play_lock:                                 # 播放互斥; 合成在上面已完成, 可并行
+        ok = _play(wav)
     if not quiet:
         print(f"[TTS] {'播放' if ok else '播放失败'}: {text} -> {wav}")
     return ok, "edge-tts"
