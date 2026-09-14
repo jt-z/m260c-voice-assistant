@@ -126,23 +126,34 @@ class MicSerial:
 
     # ---------------- 打开 / 关闭 ----------------
     def open(self):
+        """打开并配置串口(8N1). 注意 termios.error 不是 OSError 子类,
+        这里统一转成 SerialTimeoutError, 并在失败时关闭 fd 防止句柄泄漏"""
         fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        attrs = termios.tcgetattr(fd)
-        iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
-        # 原始模式 8N1
-        iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP |
-                   termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
-        oflag &= ~(termios.OPOST)
-        cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)
-        cflag |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
-        lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON |
-                   termios.ISIG | termios.IEXTEN)
-        baud_const = getattr(termios, "B%d" % self.baud, termios.B115200)
-        ispeed = ospeed = baud_const
-        cc[termios.VMIN] = 0
-        cc[termios.VTIME] = 0
-        termios.tcsetattr(fd, termios.TCSANOW,
-                          [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+        try:
+            attrs = termios.tcgetattr(fd)
+            iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
+            # 原始模式 8N1
+            iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK |
+                       termios.ISTRIP | termios.INLCR | termios.IGNCR |
+                       termios.ICRNL | termios.IXON)
+            oflag &= ~(termios.OPOST)
+            cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)
+            cflag |= (termios.CS8 | termios.CREAD | termios.CLOCAL)
+            lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON |
+                       termios.ISIG | termios.IEXTEN)
+            baud_const = getattr(termios, "B%d" % self.baud, termios.B115200)
+            ispeed = ospeed = baud_const
+            cc[termios.VMIN] = 0
+            cc[termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW,
+                              [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+        except termios.error as e:                 # 非 tty 设备 / 配置失败
+            os.close(fd)
+            raise SerialTimeoutError(
+                "打开串口失败(%s 可能不是串口设备): %s" % (self.port, e)) from e
+        except OSError:
+            os.close(fd)
+            raise
         self._fd = fd
         self._buf = b""
         return self

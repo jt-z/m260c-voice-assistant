@@ -338,9 +338,9 @@ def serial_reader(args):
             try:
                 mic = _open()
                 log(f"[串口线程] 已连接 {mic.port}")
-            except (OSError, SerialTimeoutError) as e:
-                log(f"[警告] 串口打开失败: {e}, 3 秒后重试")
-                time.sleep(3)
+            except Exception as e:      # 用宽捕获: termios.error 等不是 OSError 子类,
+                log(f"[警告] 串口打开失败: {type(e).__name__}: {e}, 3 秒后重试")
+                time.sleep(3)           # 绝不能让读取线程静默退出
                 continue
         try:
             for typ, sid, payload in mic.read_frames(timeout=0.3):
@@ -401,8 +401,8 @@ def serial_reader(args):
                                "忙碌": d["wake_busy"]})
                 last_stat = time.time()
                 last_stat_snap = dict(_stats)
-        except (OSError, SerialTimeoutError) as e:
-            log(f"[警告] 串口异常({e}), 重新连接...")
+        except Exception as e:          # 串口异常(含非 OSError 的 termios.error): 重连不退出
+            log(f"[警告] 串口异常({type(e).__name__}: {e}), 重新连接...")
             try:
                 mic.close()
             except (OSError, AttributeError):
@@ -560,6 +560,9 @@ if __name__ == "__main__":
 
     if a.log_file:
         _log_fp = open(a.log_file, "a", encoding="utf-8")
+    # Qt 的 xcb 兜底可能重启自身, 必须在加载模型之前完成, 否则模型会被加载两次
+    if a.ui and not a.wav and a.ui_backend in ("auto", "qt"):
+        _ensure_qt_libs()
     rec = load_recognizer()
     if a.wav:
         recognize_wav(rec, a.wav)
