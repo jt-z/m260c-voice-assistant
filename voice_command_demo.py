@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-voice_command_demo.py —— 语音命令控制：说“打开图片”即打开桌面/图片文件夹里的图片
+voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / “关闭图片”关闭 图片
 
 链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> Vosk 本地中文识别
-      -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开图片)
+      -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开、按路径关闭图片)
 
-日志: 所有状态带时间戳实时输出; 中间识别结果会实时刷新([识别中] ...), 定稿后打印 [识别]
-     可用 --log-file 把日志同时写入文件
+日志: 所有状态带时间戳实时输出, 常用状态提示:
+      [状态] 监听中 / 已唤醒 / 识别中(带剩余秒数, 原地刷新) / 识别结果 / 已执行命令
+      可用 --log-file 把日志同时写入文件
 
 依赖(Vosk 已装在 lerobot conda 环境, 用该环境的 python 运行):
     /home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
@@ -21,6 +22,7 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”即打开
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -37,7 +39,8 @@ AUDIO_DIR = os.path.join(PROJECT_DIR, "audio")
 WAV_RATE = 16000
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tif", ".tiff", ".svg")
 # 命令词表: Vosk 中文模型词表是按“字”的, 语法需按字用空格分隔, 只在这几句里挑最像的
-VOSK_GRAMMAR = '["打 开 图 片", "打 开 照 片", "看 一 下 图 片", "[unk]"]'
+VOSK_GRAMMAR = ('["打 开 图 片", "打 开 照 片", "看 一 下 图 片", '
+                '"关 闭 图 片", "关 掉 图 片", "[unk]"]')
 
 # 桌面优先, 无图则回退到图片文件夹
 IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
@@ -46,6 +49,7 @@ IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
 
 # ---------------------------------------------------------------- 日志
 _log_fp = None
+_last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
 
 
 def log(msg: str):
@@ -55,6 +59,11 @@ def log(msg: str):
     if _log_fp:
         _log_fp.write(line + "\n")
         _log_fp.flush()
+
+
+def log_state(msg: str):
+    """交互状态提示: 监听中 / 已唤醒 / 识别中 / 识别结果 / 已执行 …"""
+    log("[状态] " + msg)
 
 
 # ---------------------------------------------------------------- 具体动作
@@ -77,17 +86,51 @@ def find_newest_image():
 
 def open_newest_image(*_ignored):
     """打开最新的图片(桌面优先, 回退图片文件夹)"""
+    global _last_opened
     path = find_newest_image()
     if not path:
         log("[命令] 未找到图片: 请在 ~/Desktop 或 ~/Pictures 放一张图片")
         return
     log(f"[命令] 打开图片: {path}")
+    _last_opened = path
     subprocess.Popen(["xdg-open", path], start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-# 命令词 -> 动作; 想加功能只需在此登记一行
+def close_image(*_ignored):
+    """关闭本程序打开的那张图片窗口(按文件路径匹配查看器进程, 只关这一张)"""
+    global _last_opened
+    if not _last_opened:
+        log("[命令] 还没有打开过图片, 没有可关闭的窗口")
+        return
+    path = _last_opened
+    pids = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fp:
+                cmdline = fp.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if path in cmdline:                      # 该进程正在查看这张图
+            pids.append(int(pid))
+    if not pids:
+        log(f"[命令] 未找到图片窗口(可能已手动关闭): {path}")
+        _last_opened = None
+        return
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    log(f"[命令] 关闭图片: {path} (结束进程 {pids})")
+    _last_opened = None
+
+
+# 命令词 -> 动作; 顺序即优先级(“关闭”类必须先判, 否则含“图”会被打开命令截走)
 COMMANDS = [
+    (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
 
@@ -164,10 +207,11 @@ def build_stream_cmd(seconds: int):
 def stream_recognize(rec, seconds: int, wav_path: str):
     """录音的同时喂给 Vosk: 实时刷新中间结果, 结束后返回最终文本"""
     cmd, env, desc = build_stream_cmd(seconds)
-    log(f"[录音] 开始 {seconds}s ({desc}), 请说命令词…")
+    log_state(f"识别中：开始录音 {seconds}s ({desc}), 请说命令词…")
     rec.Reset()
     segments = []
-    partial_show = ""
+    shown = ""            # 上一次刷新的整行内容, 用于原地覆盖
+    t0 = time.time()
     with wave.open(wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -180,28 +224,36 @@ def stream_recognize(rec, seconds: int, wav_path: str):
                 if not chunk:
                     break
                 wf.writeframes(chunk)                      # 原始音频留档
+                remain = max(0, seconds - int(time.time() - t0))
                 if rec.AcceptWaveform(chunk):
                     seg = parse_text(rec.Result())         # 分段定稿, 实时打印
                     if seg:
-                        print("\r" + " " * (len(partial_show) + 12) + "\r",
-                              end="", flush=True)
+                        _clear_line(shown)
+                        shown = ""
                         segments.append(seg)
-                        log(f"[识别] {seg}")
-                        partial_show = ""
-                else:                                      # 实时中间结果
+                        log(f"[识别] 结果片段: {seg}")
+                else:
                     cur = json.loads(rec.PartialResult()).get("partial", "").replace(" ", "")
                     cur = cur.replace("[unk]", "")
-                    if cur and cur != partial_show:
-                        partial_show = cur
-                        print(f"\r[识别中] {cur} …", end="", flush=True)
+                    line = f"[识别中] 剩余{remain}s"
+                    if cur:
+                        line += f" 「{cur}」"
+                    if line != shown:                      # 原地刷新, 不换行
+                        shown = line
+                        print("\r" + shown, end="", flush=True)
         finally:
             proc.wait()
-    if partial_show:                                       # 清掉中间结果行
-        print("\r" + " " * (len(partial_show) + 12) + "\r", end="", flush=True)
+    _clear_line(shown)
     # FinalResult 只含尾段, 需与已定稿分段拼接
     text = "".join(segments) + parse_text(rec.FinalResult())
-    log(f"[识别] 最终: {text or '(无有效语音)'}")
+    log_state(f"识别结果：{text or '(无有效语音)'}")
     return text
+
+
+def _clear_line(shown: str):
+    """清除原地刷新的状态行"""
+    if shown:
+        print("\r" + " " * len(shown) + "\r", end="", flush=True)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -222,12 +274,15 @@ def run_live(args, rec):
         os.makedirs(AUDIO_DIR)
 
     log("=" * 60)
-    log("语音命令演示: 唤醒后说“打开图片”")
+    log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
     log(f"[串口] {mic.port} @115200")
     log(f"[识别] Vosk 本地离线识别(语法限制), 录音时长 {args.duration}s")
+    log_state("监听中：请先说唤醒词(默认「小微小微」), 再说命令词(如「打开图片」「关闭图片」)")
     log("=" * 60)
 
     last_ack_t = 0.0
+    last_beat_t = time.time()
+    listen_since = time.time()
     recent_wakes = {}
     while True:
         try:
@@ -255,14 +310,23 @@ def run_live(args, rec):
                     recent_wakes[stamp] = now
 
                 angle = sorted(set(angles))[0] if angles else None
-                log(f"[唤醒] 声源角度: {angle if angle is not None else '未知'}° "
-                    f"→ 请说命令词(如“打开图片”)")
+                log_state(f"已唤醒：声源角度 {angle if angle is not None else '未知'}° "
+                          f"→ 请说命令词(如「打开图片」)")
                 wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
                 text = stream_recognize(rec, args.duration, wav)
-                if text:
-                    dispatch(text)
+                if not text:
+                    log_state("未识别到命令词，回到监听中")
+                elif dispatch(text):
+                    log_state("已执行命令，回到监听中")
                 else:
-                    log("[命令] 未识别到内容, 忽略")
+                    log_state("未匹配到命令，回到监听中")
+                last_beat_t = time.time()
+                listen_since = time.time()
+            # 长时间无唤醒时的心跳, 提示程序仍在监听
+            if time.time() - last_beat_t >= 60:
+                log_state(f"监听中…（已连续监听 {int(time.time() - listen_since)}s, "
+                          f"请说唤醒词「小微小微」）")
+                last_beat_t = time.time()
         except (OSError, SerialTimeoutError) as e:
             log(f"[警告] 串口异常({e}), 3 秒后重连...")
             time.sleep(3)
@@ -278,6 +342,9 @@ def run_live(args, rec):
                 except (OSError, SerialTimeoutError, TypeError):
                     time.sleep(3)
             last_ack_t = 0.0
+            last_beat_t = time.time()
+            listen_since = time.time()
+            log_state(f"重连成功({mic.port})，继续监听中")
 
 
 if __name__ == "__main__":
