@@ -45,6 +45,7 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_DIR)
 from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI,
                         SerialTimeoutError, pretty_payload)
+from audio_capture import AudioCapture
 from voice_interact_test import (ala_card_ids, find_angles, find_values,
                                  has_key, pulse_source_for_xfm)
 
@@ -69,6 +70,8 @@ IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
 _log_fp = None
 _last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
 _ui = None                # Tkinter 界面实例(--ui 时启用), 由 worker 线程经其队列更新
+_capture = None           # 常开录音(环形预滚缓冲), 避免命令第一个字被切掉
+PRE_ROLL_SEC = 1.2        # 预滚时长: 唤醒瞬间回溯这段时间的音频
 _stop = threading.Event()  # 界面关闭/退出信号
 _wake_q = queue.Queue()    # 串口线程 -> 业务线程: (角度, beam, score)
 _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确提示并忽略
@@ -215,11 +218,14 @@ def recognize_wav(rec, wav_path: str):
 
 
 # ---------------------------------------------------------------- 边录边识别
-def build_stream_cmd(seconds: int):
-    """构造 raw 音频流录音命令(便于边录边识别): 优先 PulseAudio 的 XFM 源"""
+def build_stream_cmd(seconds=None):
+    """构造 raw 音频流录音命令(便于边录边识别): 优先 PulseAudio 的 XFM 源.
+    seconds=None 表示常开采集(不加 -d), 供 AudioCapture 预滚缓冲使用"""
     src = pulse_source_for_xfm()
-    common = ["-f", "S16_LE", "-r", str(WAV_RATE), "-c", "1",
-              "-t", "raw", "-d", str(seconds), "-"]
+    common = ["-f", "S16_LE", "-r", str(WAV_RATE), "-c", "1", "-t", "raw"]
+    if seconds:
+        common += ["-d", str(seconds)]
+    common += ["-"]
     if src:
         return (["arecord", "-D", "default"] + common,
                 dict(os.environ, PULSE_SOURCE=src), f"PulseAudio 源 {src}")
@@ -232,55 +238,47 @@ def build_stream_cmd(seconds: int):
 
 
 def stream_recognize(rec, seconds: int, wav_path: str):
-    """录音的同时喂给 Vosk: 实时刷新中间结果, 结束后返回最终文本"""
-    cmd, env, desc = build_stream_cmd(seconds)
-    log_state(f"识别中：开始录音 {seconds}s ({desc}), 请说命令词…", "recognize")
+    """从常开采集抓取音频(含预滚)并实时喂给 Vosk; 结束后返回最终文本"""
+    pre = _capture.pre_roll if _capture else 0.0
+    log_state(f"识别中：采集 {seconds}s + 预滚 {pre:.1f}s, 请说命令词…", "recognize")
     rec.Reset()
     segments = []
     shown = ""            # 上一次刷新的整行内容, 用于原地覆盖
-    t0 = time.time()
     peak = 0.0
+    t0 = time.time()
     with wave.open(wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(WAV_RATE)
-        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL)
-        try:
-            while True:
-                if _stop.is_set():
-                    break
-                chunk = proc.stdout.read(4000)
-                if not chunk:
-                    break
-                wf.writeframes(chunk)                      # 原始音频留档
-                remain = max(0, seconds - int(time.time() - t0))
-                # 实时电平 + 原始音频(供界面波形/频谱)
-                rms = _rms_norm(chunk)
-                peak = max(peak, rms)
+        for chunk in _capture.grab_stream(seconds):
+            if _stop.is_set():
+                break
+            wf.writeframes(chunk)
+            # 预滚部分已发生, 剩余时间只按唤醒后的部分计
+            heard = max(0.0, time.time() - t0 - pre)
+            remain = max(0, int(seconds - heard))
+            rms = _rms_norm(chunk)
+            peak = max(peak, rms)
+            if _ui:
+                _ui.level(peak)
+            if rec.AcceptWaveform(chunk):
+                seg = parse_text(rec.Result())         # 分段定稿, 实时打印
+                if seg:
+                    _clear_line(shown)
+                    shown = ""
+                    segments.append(seg)
+                    log(f"[识别] 结果片段: {seg}")
+            else:
+                cur = json.loads(rec.PartialResult()).get("partial", "").replace(" ", "")
+                cur = cur.replace("[unk]", "")
                 if _ui:
-                    _ui.level(peak)
-                    _ui.samples(chunk)
-                if rec.AcceptWaveform(chunk):
-                    seg = parse_text(rec.Result())         # 分段定稿, 实时打印
-                    if seg:
-                        _clear_line(shown)
-                        shown = ""
-                        segments.append(seg)
-                        log(f"[识别] 结果片段: {seg}")
-                else:
-                    cur = json.loads(rec.PartialResult()).get("partial", "").replace(" ", "")
-                    cur = cur.replace("[unk]", "")
-                    if _ui:
-                        _ui.partial(cur, remain)
-                    line = f"[识别中] 剩余{remain}s"
-                    if cur:
-                        line += f" 「{cur}」"
-                    if line != shown:                      # 原地刷新, 不换行
-                        shown = line
-                        print("\r" + shown, end="", flush=True)
-        finally:
-            proc.wait()
+                    _ui.partial(cur, remain)
+                line = f"[识别中] 剩余{remain}s"
+                if cur:
+                    line += f" 「{cur}」"
+                if line != shown:                      # 原地刷新, 不换行
+                    shown = line
+                    print("\r" + shown, end="", flush=True)
     _clear_line(shown)
     if _ui:
         _ui.level(0.0)
@@ -416,14 +414,28 @@ def serial_reader(args):
             pass
 
 
+def _on_audio_chunk(chunk):
+    """常开采集回调: 持续喂界面(瀑布图/电平), 与是否在识别无关"""
+    if _ui:
+        _ui.samples(chunk)
+        _ui.level(_rms_norm(chunk))
+
+
 def run_live(args, rec):
-    """唤醒 -> 边录边识别 -> 执行命令(串口读取在独立线程, 录音期间不再有盲区)"""
+    """唤醒 -> 从常开采集抓取(含预滚) -> 边录边识别 -> 执行命令"""
+    global _capture
     if not os.path.isdir(AUDIO_DIR):
         os.makedirs(AUDIO_DIR)
 
     log("=" * 60)
     log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
-    log(f"[识别] Vosk 本地离线识别(语法限制), 录音时长 {args.duration}s")
+    log(f"[识别] Vosk 本地离线识别(语法限制), 唤醒后采集 {args.duration}s")
+    cmd, env, desc = build_stream_cmd(None)
+    _capture = AudioCapture(cmd, env=env, pre_roll=PRE_ROLL_SEC,
+                            on_chunk=_on_audio_chunk,
+                            on_warn=lambda m: log(f"[警告] {m}")).start()
+    log(f"[采集] 常开录音已启动 ({desc}), 预滚 {PRE_ROLL_SEC}s "
+        f"—— 唤醒前的声音会被保留, 命令第一个字不再丢")
     log_state(f"监听中：请先说唤醒词(当前「{WAKE_WORD_TEXT}」/ {WAKE_WORD_PINYIN}), "
               f"再说命令词(如「打开图片」「关闭图片」)", "listen")
     log("=" * 60)
