@@ -2,7 +2,7 @@
 """
 sound_radar_hud.py —— M260C 声源定位「科幻 HUD」实时界面(PySide6 / Qt6)
 
-与 sound_radar_ui.py(Tk 版) 暴露完全相同的接口, 业务层(voice_command_demo.py)零改动:
+业务层(voice_command_demo.py)通过以下接口驱动本界面, 二者完全解耦:
     state(text, kind) / log(line) / angle(deg, beam, score) / level(rms)
     samples(chunk) / partial(text, remain) / stats(dict) / on_close(cb) / run()
 
@@ -450,7 +450,7 @@ def _fmt(color):
     return f
 
 
-# ---------------------------------------------------------------- 门面(与 Tk 版同接口)
+# ---------------------------------------------------------------- 门面(业务层唯一入口)
 class SoundRadarHUD:
     def __init__(self, title="M260C 声源定位 HUD"):
         self._app = QApplication.instance() or QApplication(sys.argv)

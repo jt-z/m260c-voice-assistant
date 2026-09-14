@@ -22,13 +22,11 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 
 用法:
     <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”
-    <lerobot-python> voice_command_demo.py --ui               # HUD 界面(Qt 优先, 无 PySide6 时用 Tk)
-    <lerobot-python> voice_command_demo.py --ui --ui-backend tk   # 强制用 Tkinter 界面
+    <lerobot-python> voice_command_demo.py --ui               # 打开实时 HUD 界面(PySide6)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
-    python3 sound_radar_hud.py 30                             # 只预览 HUD(Qt, 模拟数据)
-    python3 sound_radar_ui.py 30                              # 只预览界面(Tk, 模拟数据)
+    python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
 """
 import argparse
 import json
@@ -69,7 +67,7 @@ IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
 # ---------------------------------------------------------------- 日志
 _log_fp = None
 _last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
-_ui = None                # Tkinter 界面实例(--ui 时启用), 由 worker 线程经其队列更新
+_ui = None                # HUD 界面实例(--ui 时启用), 由 worker 线程经其队列更新
 _capture = None           # 常开录音(环形预滚缓冲), 避免命令第一个字被切掉
 PRE_ROLL_SEC = 1.2        # 预滚时长: 唤醒瞬间回溯这段时间的音频
 _stop = threading.Event()  # 界面关闭/退出信号
@@ -524,20 +522,14 @@ def _ensure_qt_libs():
     os.execve(sys.executable, [sys.executable] + sys.argv, env)
 
 
-def load_ui(backend="auto"):
-    """选择界面后端: Qt(PySide6, 观感最佳) 优先, 退化到 Tk. 返回 (类, 名字)"""
-    order = {"auto": ["qt", "tk"], "qt": ["qt"], "tk": ["tk"]}.get(backend, ["qt", "tk"])
-    for name in order:
-        try:
-            if name == "qt":
-                _ensure_qt_libs()
-                from sound_radar_hud import SoundRadarHUD as ui_cls
-            else:
-                from sound_radar_ui import SoundRadarUI as ui_cls
-            return ui_cls, name
-        except Exception as e:
-            log(f"[警告] 界面后端 {name} 不可用: {type(e).__name__}: {e}")
-    return None, None
+def load_ui():
+    """加载界面实现(PySide6). 返回 (类, 名字); 不可用则 (None, None)"""
+    try:
+        from sound_radar_hud import SoundRadarHUD as ui_cls
+        return ui_cls, "qt"
+    except Exception as e:
+        log(f"[警告] 界面后端不可用: {type(e).__name__}: {e}")
+        return None, None
 
 
 def run_with_ui(args, rec):
@@ -546,7 +538,7 @@ def run_with_ui(args, rec):
     if not ensure_x_display():
         log("[错误] 当前环境无法显示图形界面, 退回无界面模式(日志照常输出)")
         return run_live(args, rec)
-    ui_cls, backend = load_ui(getattr(args, "ui_backend", "auto"))
+    ui_cls, backend = load_ui()
     if ui_cls is None:
         log("[错误] 没有可用的界面后端, 退回无界面模式")
         return run_live(args, rec)
@@ -567,16 +559,14 @@ if __name__ == "__main__":
     ap.add_argument("--duration", type=int, default=3, help="唤醒后录音秒数(默认3)")
     ap.add_argument("--log-file", help="同时把日志写入该文件")
     ap.add_argument("--ui", action="store_true",
-                    help="打开实时界面: 环形角度雷达 + 状态提示 + 波形/频谱 + 日志")
-    ap.add_argument("--ui-backend", choices=["auto", "qt", "tk"], default="auto",
-                    help="界面后端: qt=PySide6(默认优先, 观感最佳), tk=Tkinter(零依赖), auto=自动")
+                    help="打开实时 HUD 界面(PySide6): 环形角度雷达 + 频谱瀑布图 + 状态提示 + 日志")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
     if a.log_file:
         _log_fp = open(a.log_file, "a", encoding="utf-8")
     # Qt 的 xcb 兜底可能重启自身, 必须在加载模型之前完成, 否则模型会被加载两次
-    if a.ui and not a.wav and a.ui_backend in ("auto", "qt"):
+    if a.ui and not a.wav:
         _ensure_qt_libs()
     rec = load_recognizer()
     if a.wav:
