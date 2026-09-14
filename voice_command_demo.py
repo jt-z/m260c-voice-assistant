@@ -253,11 +253,12 @@ def stream_recognize(rec, seconds: int, wav_path: str):
                     break
                 wf.writeframes(chunk)                      # 原始音频留档
                 remain = max(0, seconds - int(time.time() - t0))
-                # 实时电平(归一化 RMS, 0~1)
+                # 实时电平 + 原始音频(供界面波形/频谱)
                 rms = _rms_norm(chunk)
                 peak = max(peak, rms)
                 if _ui:
                     _ui.level(peak)
+                    _ui.samples(chunk)
                 if rec.AcceptWaveform(chunk):
                     seg = parse_text(rec.Result())         # 分段定稿, 实时打印
                     if seg:
@@ -392,6 +393,10 @@ def serial_reader(args):
                     f"握手帧 {d['shake']} / 设备事件 {d['events']} / "
                     f"唤醒 {d['wakes']} / 重复忽略 {d['wake_dup']} / "
                     f"忙碌忽略 {d['wake_busy']} / 其它 {d['other']}")
+                if _ui:                                  # 界面右上角诊断计数
+                    _ui.stats({"握手": d["shake"], "事件": d["events"],
+                               "唤醒": d["wakes"], "重复": d["wake_dup"],
+                               "忙碌": d["wake_busy"]})
                 last_stat = time.time()
                 last_stat_snap = dict(_stats)
         except (OSError, SerialTimeoutError) as e:
