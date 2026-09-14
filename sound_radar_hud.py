@@ -408,7 +408,7 @@ class HudWindow(QMainWindow):
         self.lbl_partial.setFont(QFont(hud.cjk_family, 15, QFont.Bold))
         self.lbl_partial.setStyleSheet(f"color:{AMBER};")
         self.lbl_partial.setWordWrap(True)
-        panel("实时识别文本", self.lbl_partial)
+        panel("实时识别文本 (SenseVoice)", self.lbl_partial)
 
         self.wave = WaterfallWidget(hud)
         panel("实时频谱瀑布图 (80Hz–8kHz)", self.wave)

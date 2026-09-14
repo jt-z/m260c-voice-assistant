@@ -21,16 +21,16 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
 
 用法:
-    <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”(默认混合识别)
-    <lerobot-python> voice_command_demo.py --ui               # 打开实时 HUD 界面(PySide6)
-    <lerobot-python> voice_command_demo.py --asr vosk         # 只用 Vosk(轻量, 需 funasr 未装时)
+    <lerobot-python> voice_command_demo.py                    # 默认 SenseVoice(实时文本+定稿)
+    <lerobot-python> voice_command_demo.py --ui               # 实时 HUD 界面(PySide6)
+    <lerobot-python> voice_command_demo.py --asr vosk         # 退回仅 Vosk(轻量, 逐段流式)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
 
-识别分工: Vosk 提供界面实时逐字(partial), SenseVoice 提供最终文本与命令判定.
+识别: 默认 SenseVoice 一个引擎负责"界面/终端实时文本 + 最终定稿"(非流式, 用滚动重解码近似实时).
 """
 import argparse
 import json
@@ -366,12 +366,6 @@ def _rms_norm(chunk: bytes) -> float:
     return min(1.0, (s / n) ** 0.5 / 8000.0)
 
 
-def _clear_line(shown: str):
-    """清除原地刷新的状态行"""
-    if shown:
-        print("\r" + " " * len(shown) + "\r", end="", flush=True)
-
-
 # ---------------------------------------------------------------- 主流程
 def serial_reader(args):
     """独立线程: 持续读串口 -> ACK 握手 -> 解析唤醒事件入队; 掉线自动重连.
@@ -489,8 +483,8 @@ def run_live(args, rec):
 
     log("=" * 60)
     log("语音命令演示: 说「打开图片」打开 / 说「关闭图片」关闭")
-    log(f"[识别] 引擎: Vosk 实时逐字 + SenseVoice 最终解码"
-        if _sv is not None else "[识别] 引擎: Vosk(语法限制)")
+    log(f"[识别] 引擎: SenseVoice(实时文本 + 定稿, CPU)"
+        if _sv is not None else "[识别] 引擎: Vosk(逐段流式)")
     log(f"[识别] 唤醒后采集 {args.duration}s")
     cmd, env, desc = build_stream_cmd(None)
     _capture = AudioCapture(cmd, env=env, pre_roll=PRE_ROLL_SEC,
