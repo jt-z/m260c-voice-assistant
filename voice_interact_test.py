@@ -11,7 +11,7 @@ voice_interact_test.py —— M260C 智能音箱语音交互测试(纯 Python)
 
 本脚本仅依赖 Python 标准库与系统自带 arecord/aplay, 无需讯飞账号即可测试:
   1) 串口链路: 握手帧收发自动确认; --version 可查询降噪板固件版本
-  2) 唤醒检测: 对音箱说唤醒词(默认"小微小微", 以板内设置为准),
+  2) 唤醒检测: 对音箱说唤醒词(当前「小宽小宽」, 以板内设置为准),
                解析并打印唤醒事件与声源角度(环形 0~360°)
   3) 录音拾音: 唤醒后自动用 XFM-DP 麦克风录制 N 秒指令音频存为 WAV
   4) 扬声器播报: 录制完成后回放到 C-Media USB 扬声器(双扬声器)
@@ -25,12 +25,13 @@ voice_interact_test.py —— M260C 智能音箱语音交互测试(纯 Python)
   python3 voice_interact_test.py --duration 5     # 每次唤醒后录 5 秒
   python3 voice_interact_test.py --no-playback    # 唤醒后只录音不播放
   python3 voice_interact_test.py --port /dev/ttyACM1   # 手动指定串口
-  python3 voice_interact_test.py --set-wakeword "ni2 hao3 xiao3 wei1"   # 改唤醒词(你好小微), 改完需拔插
+  python3 voice_interact_test.py --set-wakeword "ni2 hao3 xiao3 wei1"   # 改唤醒词(如「你好小微」, 改完需拔插)
 """
 import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +43,9 @@ from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI, MSG_CONTROL,
 
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 WAV_RATE = 16000
+# 当前板内唤醒词(2026-09 通过 --set-wakeword 改为「小宽小宽」; 出厂默认为「小微小微」)
+WAKE_WORD_TEXT = "小宽小宽"
+WAKE_WORD_PINYIN = "xiao3 kuan1 xiao3 kuan1"
 
 # ---------------------------------------------------------------- 音频设备解析
 def ala_card_ids(kind: str):
@@ -69,6 +73,22 @@ def pulse_source_for_xfm():
     return None
 
 
+def pulse_sink_for_speaker():
+    """通过 PulseAudio 找到 C-Media USB 扬声器 sink 名
+    (拔插后 PA 常独占 ALSA 设备, 此时直连 plughw 会报 Device busy, 需经 PA 播放)"""
+    try:
+        out = subprocess.run(["pactl", "list", "sinks", "short"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and ("C-Media" in line or "USB_Audio_Device" in line) \
+                and "XFM" not in line:
+            return parts[1]
+    return None
+
+
 def build_arecord_cmd(seconds: int, wav: str):
     """构造录音命令: 优先 PulseAudio 的 XFM 源; 失败回退 ALSA hw 直连"""
     src = pulse_source_for_xfm()
@@ -87,14 +107,21 @@ def build_arecord_cmd(seconds: int, wav: str):
             "-d", str(seconds), wav], None, "系统默认录音设备"
 
 
-def build_aplay_cmd(wav: str):
-    """播放: 直接走 C-Media USB 扬声器(plughw 自动转格式/声道)"""
+def playback_cmds(wav: str):
+    """播放候选命令(按优先级): 先经 PulseAudio 播到 C-Media USB 扬声器
+    (拔插后 PA 常独占 ALSA, 直连 plughw 会报 Device busy), 再回退 ALSA plughw"""
+    cmds = []
+    sink = pulse_sink_for_speaker()
+    if sink and shutil.which("paplay"):
+        cmds.append(["paplay", "--device=%s" % sink, wav])
     pb_ids = ala_card_ids("aplay")
     target = next((c for c, d in pb_ids.items()
                    if any("USB Audio" in x and "XFM" not in x for x in d)), None)
-    if target:
-        return ["aplay", "-D", "plughw:CARD=%s,DEV=0" % target, wav]
-    return ["aplay", wav]
+    if target and shutil.which("aplay"):
+        cmds.append(["aplay", "-D", "plughw:CARD=%s,DEV=0" % target, wav])
+    if not cmds:
+        cmds.append(["aplay", wav])
+    return cmds
 
 
 def record_audio(seconds: int, wav: str):
@@ -109,10 +136,15 @@ def record_audio(seconds: int, wav: str):
 
 
 def play_audio(wav: str):
-    cmd = build_aplay_cmd(wav)
-    print("[播放] ", " ".join(cmd))
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    print("[播放] 完成" if r.returncode == 0 else "[播放] 失败: " + r.stderr.strip())
+    """回放录音: 按候选通路依次尝试(PA -> ALSA plughw)"""
+    for cmd in playback_cmds(wav):
+        print("[播放] ", " ".join(cmd))
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print("[播放] 完成")
+            return True
+        print("[播放] 失败: " + (r.stderr.strip() or r.stdout.strip()))
+    return False
 
 
 # ---------------------------------------------------------------- JSON 载荷解析
@@ -197,7 +229,7 @@ def run_interact(args):
     print("=" * 60)
     print("M260C 智能音箱语音交互测试")
     print(f"[串口] {mic.port} @115200  打开成功")
-    print(f"[提示] 对音箱说唤醒词(默认: 小微小微, 以板内设置为准)触发交互")
+    print(f"[提示] 对音箱说唤醒词(当前: {WAKE_WORD_TEXT} / {WAKE_WORD_PINYIN}) 触发交互")
     print("=" * 60)
 
     # ---- 修改唤醒词(资料: {"type":"wakeup_keywords", ...}, 改完需重新插拔设备) ----
@@ -210,6 +242,8 @@ def run_interact(args):
             print("[唤醒词] ", pretty_payload(typ, payload).replace("\n", " "))
         print("[唤醒词] " + ("设备已回应" if ok else "未收到回应(命令可能已生效)")
               + " —— 请拔插一次音箱(重新上电), 再用新唤醒词测试")
+        print(f"[唤醒词] 提示: 当前下发值 '{args.set_wakeword}'; "
+              f"恢复出厂默认可用 --set-wakeword \"xiao3 wei1 xiao3 wei1\"")
         mic.close()
         return
 
@@ -267,11 +301,11 @@ def run_interact(args):
                               + pretty_payload(typ, payload).replace("\n", " "))
                         continue
 
-                    # 同一唤醒事件可能被固件重发, 用 start_ms 去重(10s 窗口)
+                    # 同一唤醒事件可能被固件重发, 用 start_ms 去重(30s 窗口)
                     stamp = tuple(find_values(obj, "start_ms")) if obj else ()
                     now = time.time()
                     if stamp and stamp in recent_wakes \
-                            and now - recent_wakes[stamp] < 10.0:
+                            and now - recent_wakes[stamp] < 30.0:
                         print(f"[唤醒] 忽略重复事件 start_ms={stamp[0]}")
                         continue
                     if stamp:
@@ -322,6 +356,7 @@ if __name__ == "__main__":
     ap.add_argument("--duration", type=int, default=4, help="唤醒后录音秒数(默认4)")
     ap.add_argument("--no-playback", action="store_true", help="唤醒后不自动回放")
     ap.add_argument("--set-wakeword", metavar="PINYIN",
-                    help='修改唤醒词, 拼音带声调, 如 "ni2 hao3 xiao3 wei1"(你好小微); 改完需重新插拔设备')
+                    help="修改唤醒词, 拼音带声调. 当前「小宽小宽」= xiao3 kuan1 xiao3 kuan1; "
+                         "出厂默认「小微小微」= xiao3 wei1 xiao3 wei1. 改完需重新插拔设备")
     ap.add_argument("--threshold", default="900", help="唤醒阈值(默认900, 越大越难唤醒)")
     run_interact(ap.parse_args())
