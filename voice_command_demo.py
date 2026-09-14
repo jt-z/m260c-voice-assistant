@@ -18,9 +18,11 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
 
 用法:
     <lerobot-python> voice_command_demo.py                    # 唤醒后说“打开图片”
+    <lerobot-python> voice_command_demo.py --ui               # 带实时界面(雷达/状态/日志/电平)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
+    python3 sound_radar_ui.py 20                              # 只预览界面(模拟数据, 不连硬件)
 """
 import argparse
 import json
@@ -28,6 +30,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import wave
 
@@ -57,20 +60,26 @@ IMAGE_DIRS = [os.path.join(os.path.expanduser("~"), "Desktop"),
 # ---------------------------------------------------------------- 日志
 _log_fp = None
 _last_opened = None       # 最近打开的图片路径, 供“关闭图片”定位窗口进程
+_ui = None                # Tkinter 界面实例(--ui 时启用), 由 worker 线程经其队列更新
+_stop = threading.Event()  # 界面关闭/退出信号
 
 
 def log(msg: str):
-    """带时间戳的实时日志(控制台 + 可选日志文件)"""
+    """带时间戳的实时日志(控制台 + 可选日志文件 + 可选界面)"""
     line = "%s %s" % (time.strftime("[%H:%M:%S]"), msg)
     print(line, flush=True)
     if _log_fp:
         _log_fp.write(line + "\n")
         _log_fp.flush()
+    if _ui:
+        _ui.log(line)
 
 
-def log_state(msg: str):
+def log_state(msg: str, kind: str = "info"):
     """交互状态提示: 监听中 / 已唤醒 / 识别中 / 识别结果 / 已执行 …"""
     log("[状态] " + msg)
+    if _ui:
+        _ui.state(msg, kind)
 
 
 # ---------------------------------------------------------------- 具体动作
@@ -214,11 +223,12 @@ def build_stream_cmd(seconds: int):
 def stream_recognize(rec, seconds: int, wav_path: str):
     """录音的同时喂给 Vosk: 实时刷新中间结果, 结束后返回最终文本"""
     cmd, env, desc = build_stream_cmd(seconds)
-    log_state(f"识别中：开始录音 {seconds}s ({desc}), 请说命令词…")
+    log_state(f"识别中：开始录音 {seconds}s ({desc}), 请说命令词…", "recognize")
     rec.Reset()
     segments = []
     shown = ""            # 上一次刷新的整行内容, 用于原地覆盖
     t0 = time.time()
+    peak = 0.0
     with wave.open(wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -227,11 +237,18 @@ def stream_recognize(rec, seconds: int, wav_path: str):
                                 stderr=subprocess.DEVNULL)
         try:
             while True:
+                if _stop.is_set():
+                    break
                 chunk = proc.stdout.read(4000)
                 if not chunk:
                     break
                 wf.writeframes(chunk)                      # 原始音频留档
                 remain = max(0, seconds - int(time.time() - t0))
+                # 实时电平(归一化 RMS, 0~1)
+                rms = _rms_norm(chunk)
+                peak = max(peak, rms)
+                if _ui:
+                    _ui.level(peak)
                 if rec.AcceptWaveform(chunk):
                     seg = parse_text(rec.Result())         # 分段定稿, 实时打印
                     if seg:
@@ -242,6 +259,8 @@ def stream_recognize(rec, seconds: int, wav_path: str):
                 else:
                     cur = json.loads(rec.PartialResult()).get("partial", "").replace(" ", "")
                     cur = cur.replace("[unk]", "")
+                    if _ui:
+                        _ui.partial(cur, remain)
                     line = f"[识别中] 剩余{remain}s"
                     if cur:
                         line += f" 「{cur}」"
@@ -251,10 +270,30 @@ def stream_recognize(rec, seconds: int, wav_path: str):
         finally:
             proc.wait()
     _clear_line(shown)
+    if _ui:
+        _ui.level(0.0)
+        _ui.partial("")
     # FinalResult 只含尾段, 需与已定稿分段拼接
     text = "".join(segments) + parse_text(rec.FinalResult())
-    log_state(f"识别结果：{text or '(无有效语音)'}")
+    log_state(f"识别结果：{text or '(无有效语音)'}", "result" if text else "warn")
     return text
+
+
+def _rms_norm(chunk: bytes) -> float:
+    """S16LE 裸流的归一化 RMS(0~1), 用于界面电平条(抽样计算, 足够 UI 用)"""
+    from array import array
+    a = array("h")
+    a.frombytes(chunk[:len(chunk) // 2 * 2])
+    if not a:
+        return 0.0
+    step = 8                                   # 抽样, 降低 CPU 占用
+    n = 0
+    s = 0
+    for i in range(0, len(a), step):
+        v = a[i]
+        s += v * v
+        n += 1
+    return min(1.0, (s / n) ** 0.5 / 8000.0)
 
 
 def _clear_line(shown: str):
@@ -285,14 +324,14 @@ def run_live(args, rec):
     log(f"[串口] {mic.port} @115200")
     log(f"[识别] Vosk 本地离线识别(语法限制), 录音时长 {args.duration}s")
     log_state(f"监听中：请先说唤醒词(当前「{WAKE_WORD_TEXT}」/ {WAKE_WORD_PINYIN}), "
-              f"再说命令词(如「打开图片」「关闭图片」)")
+              f"再说命令词(如「打开图片」「关闭图片」)", "listen")
     log("=" * 60)
 
     last_ack_t = 0.0
     last_beat_t = time.time()
     listen_since = time.time()
     recent_wakes = {}
-    while True:
+    while not _stop.is_set():
         try:
             for typ, sid, payload in mic.read_frames(timeout=0.5):
                 if typ == MSG_SHAKE:
@@ -313,37 +352,45 @@ def run_live(args, rec):
                 stamp = tuple(find_values(obj, "start_ms"))    # 固件会重发同一唤醒
                 now = time.time()
                 if stamp and stamp in recent_wakes and now - recent_wakes[stamp] < 30:
-                    log_state("忽略重复唤醒事件(固件重发)")
+                    log_state("忽略重复唤醒事件(固件重发)", "listen")
                     continue
                 if stamp:
                     recent_wakes[stamp] = now
 
                 angle = sorted(set(angles))[0] if angles else None
+                beams = find_values(obj, "beam")
+                scores = find_values(obj, "score")
+                if _ui and angle is not None:                  # 界面: 雷达指针+波束
+                    _ui.angle(angle,
+                              beams[0] if beams else None,
+                              scores[0] if scores else None)
                 log_state(f"已唤醒：声源角度 {angle if angle is not None else '未知'}° "
-                          f"→ 请说命令词(如「打开图片」)")
+                          f"→ 请说命令词(如「打开图片」)", "awake")
                 wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
                 text = stream_recognize(rec, args.duration, wav)
                 if not text:
-                    log_state("未识别到命令词，回到监听中")
+                    log_state("未识别到命令词，回到监听中", "listen")
                 elif dispatch(text):
-                    log_state("已执行命令，回到监听中")
+                    log_state("已执行命令，回到监听中", "done")
                 else:
-                    log_state("未匹配到命令，回到监听中")
+                    log_state("未匹配到命令，回到监听中", "listen")
                 last_beat_t = time.time()
                 listen_since = time.time()
             # 长时间无唤醒时的心跳, 提示程序仍在监听
             if time.time() - last_beat_t >= 60:
                 log_state(f"监听中…（已连续监听 {int(time.time() - listen_since)}s, "
-                          f"请说唤醒词「{WAKE_WORD_TEXT}」）")
+                          f"请说唤醒词「{WAKE_WORD_TEXT}」）", "listen")
                 last_beat_t = time.time()
         except (OSError, SerialTimeoutError) as e:
             log(f"[警告] 串口异常({e}), 3 秒后重连...")
             time.sleep(3)
+            if _stop.is_set():
+                break
             try:
                 mic.close()
             except OSError:
                 pass
-            while True:
+            while not _stop.is_set():
                 try:
                     port, mic = MicSerial.autodetect(timeout=1.5)
                     mic = mic or MicSerial(port).open()
@@ -353,7 +400,25 @@ def run_live(args, rec):
             last_ack_t = 0.0
             last_beat_t = time.time()
             listen_since = time.time()
-            log_state(f"重连成功({mic.port})，继续监听中")
+            log_state(f"重连成功({mic.port})，继续监听中", "listen")
+    try:
+        mic.close()
+    except OSError:
+        pass
+
+
+def run_with_ui(args, rec):
+    """界面模式: worker 线程跑主循环, 主线程跑 Tk(界面关闭即整体退出)"""
+    global _ui
+    from sound_radar_ui import SoundRadarUI
+    _ui = SoundRadarUI()
+    _ui.on_close(lambda: _stop.set())
+
+    worker = threading.Thread(target=run_live, args=(args, rec), daemon=True)
+    worker.start()
+    _ui.run()                      # 阻塞到关窗
+    _stop.set()
+    worker.join(timeout=3)
 
 
 if __name__ == "__main__":
@@ -361,6 +426,8 @@ if __name__ == "__main__":
     ap.add_argument("--port", help="降噪板串口(默认自动检测)")
     ap.add_argument("--duration", type=int, default=3, help="唤醒后录音秒数(默认3)")
     ap.add_argument("--log-file", help="同时把日志写入该文件")
+    ap.add_argument("--ui", action="store_true",
+                    help="打开实时界面(Tkinter): 环形角度雷达 + 状态提示 + 日志 + 电平条")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
@@ -369,5 +436,11 @@ if __name__ == "__main__":
     rec = load_recognizer()
     if a.wav:
         recognize_wav(rec, a.wav)
+    elif a.ui:
+        run_with_ui(a, rec)
     else:
-        run_live(a, rec)
+        try:
+            run_live(a, rec)
+        except KeyboardInterrupt:
+            _stop.set()
+            print("\n用户中断, 退出")
