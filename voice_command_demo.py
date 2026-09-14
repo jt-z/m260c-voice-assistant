@@ -17,7 +17,7 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
     /home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
     模型: models/vosk-model-small-cn-0.22 (见 .gitignore 的 models 忽略项)
 
-当前板内唤醒词: 「小宽小宽」(xiao3 kuan1 xiao3 kuan1);
+当前板内唤醒词: 「你好宽宽」(ni2 hao3 kuan1 kuan1);
 改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
 
 用法:
@@ -50,10 +50,10 @@ from voice_interact_test import (ala_card_ids, find_angles, find_values,
 MODEL_DIR = os.path.join(PROJECT_DIR, "models", "vosk-model-small-cn-0.22")
 AUDIO_DIR = os.path.join(PROJECT_DIR, "audio")
 WAV_RATE = 16000
-# 当前板内唤醒词(2026-09 通过 voice_interact_test.py --set-wakeword 改为「小宽小宽」;
+# 当前板内唤醒词(2026-09 通过 voice_interact_test.py --set-wakeword 改为「你好宽宽」;
 # 出厂默认为「小微小微」= xiao3 wei1 xiao3 wei1)
-WAKE_WORD_TEXT = "小宽小宽"
-WAKE_WORD_PINYIN = "xiao3 kuan1 xiao3 kuan1"
+WAKE_WORD_TEXT = "你好宽宽"
+WAKE_WORD_PINYIN = "ni2 hao3 kuan1 kuan1"
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif", ".tif", ".tiff", ".svg")
 # 命令词表: Vosk 中文模型词表是按“字”的, 语法需按字用空格分隔, 只在这几句里挑最像的
 VOSK_GRAMMAR = ('["打 开 图 片", "打 开 照 片", "看 一 下 图 片", '

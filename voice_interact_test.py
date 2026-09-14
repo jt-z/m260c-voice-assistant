@@ -11,7 +11,7 @@ voice_interact_test.py —— M260C 智能音箱语音交互测试(纯 Python)
 
 本脚本仅依赖 Python 标准库与系统自带 arecord/aplay, 无需讯飞账号即可测试:
   1) 串口链路: 握手帧收发自动确认; --version 可查询降噪板固件版本
-  2) 唤醒检测: 对音箱说唤醒词(当前「小宽小宽」, 以板内设置为准),
+  2) 唤醒检测: 对音箱说唤醒词(当前「你好宽宽」, 以板内设置为准),
                解析并打印唤醒事件与声源角度(环形 0~360°)
   3) 录音拾音: 唤醒后自动用 XFM-DP 麦克风录制 N 秒指令音频存为 WAV
   4) 扬声器播报: 录制完成后回放到 C-Media USB 扬声器(双扬声器)
@@ -43,9 +43,9 @@ from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI, MSG_CONTROL,
 
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 WAV_RATE = 16000
-# 当前板内唤醒词(2026-09 通过 --set-wakeword 改为「小宽小宽」; 出厂默认为「小微小微」)
-WAKE_WORD_TEXT = "小宽小宽"
-WAKE_WORD_PINYIN = "xiao3 kuan1 xiao3 kuan1"
+# 当前板内唤醒词(2026-09 通过 --set-wakeword 改为「你好宽宽」; 出厂默认为「小微小微」)
+WAKE_WORD_TEXT = "你好宽宽"
+WAKE_WORD_PINYIN = "ni2 hao3 kuan1 kuan1"
 
 # ---------------------------------------------------------------- 音频设备解析
 def ala_card_ids(kind: str):
@@ -356,7 +356,7 @@ if __name__ == "__main__":
     ap.add_argument("--duration", type=int, default=4, help="唤醒后录音秒数(默认4)")
     ap.add_argument("--no-playback", action="store_true", help="唤醒后不自动回放")
     ap.add_argument("--set-wakeword", metavar="PINYIN",
-                    help="修改唤醒词, 拼音带声调. 当前「小宽小宽」= xiao3 kuan1 xiao3 kuan1; "
+                    help="修改唤醒词, 拼音带声调. 当前「你好宽宽」= ni2 hao3 kuan1 kuan1; "
                          "出厂默认「小微小微」= xiao3 wei1 xiao3 wei1. 改完需重新插拔设备")
     ap.add_argument("--threshold", default="900", help="唤醒阈值(默认900, 越大越难唤醒)")
     run_interact(ap.parse_args())

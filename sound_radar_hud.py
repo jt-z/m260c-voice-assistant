@@ -413,7 +413,7 @@ class HudWindow(QMainWindow):
         self.wave = WaterfallWidget(hud)
         panel("实时频谱瀑布图 (80Hz–8kHz)", self.wave)
 
-        self.lbl_hint = QLabel("说「小宽小宽」唤醒 → 说「打开图片」/「关闭图片」")
+        self.lbl_hint = QLabel("说「你好宽宽」唤醒 → 说「打开图片」/「关闭图片」")
         self.lbl_hint.setWordWrap(True)
         self.lbl_hint.setStyleSheet(f"color:{BLUE};")
         self.lbl_hint.setFont(QFont(hud.cjk_family, 12))
@@ -683,7 +683,7 @@ def demo_preview(seconds: int = 30):
     import struct
     hud = SoundRadarHUD("声源定位 HUD - 预览(模拟数据)")
     state = {"deg": 0.0, "phase": 0, "t0": time.time()}
-    kinds = {"listen": "监听中：请先说唤醒词「小宽小宽」",
+    kinds = {"listen": "监听中：请先说唤醒词「你好宽宽」",
              "awake": "已唤醒：声源角度 {d:.0f}° → 请说命令词",
              "recognize": "识别中：开始录音 3s, 请说命令词…",
              "result": "识别结果：打开图片"}
