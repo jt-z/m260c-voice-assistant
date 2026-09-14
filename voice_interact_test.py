@@ -25,6 +25,7 @@ voice_interact_test.py —— M260C 智能音箱语音交互测试(纯 Python)
   python3 voice_interact_test.py --duration 5     # 每次唤醒后录 5 秒
   python3 voice_interact_test.py --no-playback    # 唤醒后只录音不播放
   python3 voice_interact_test.py --port /dev/ttyACM1   # 手动指定串口
+  python3 voice_interact_test.py --set-wakeword "ni2 hao3 xiao3 wei1"   # 改唤醒词(你好小微), 改完需拔插
 """
 import argparse
 import json
@@ -199,6 +200,19 @@ def run_interact(args):
     print(f"[提示] 对音箱说唤醒词(默认: 小微小微, 以板内设置为准)触发交互")
     print("=" * 60)
 
+    # ---- 修改唤醒词(资料: {"type":"wakeup_keywords", ...}, 改完需重新插拔设备) ----
+    if args.set_wakeword:
+        cmd = {"type": "wakeup_keywords",
+               "content": {"keyword": args.set_wakeword, "threshold": str(args.threshold)}}
+        print(f"[唤醒词] 下发: keyword='{args.set_wakeword}' threshold={args.threshold}")
+        replies, ok = mic.cmd_json(cmd, sid=3, wait_reply=3)
+        for typ, sid, payload in replies:
+            print("[唤醒词] ", pretty_payload(typ, payload).replace("\n", " "))
+        print("[唤醒词] " + ("设备已回应" if ok else "未收到回应(命令可能已生效)")
+              + " —— 请拔插一次音箱(重新上电), 再用新唤醒词测试")
+        mic.close()
+        return
+
     # ---- 版本查询 ----
     if args.version:
         replies, ok = mic.cmd_json({"type": "version"}, sid=1, wait_reply=4)
@@ -307,4 +321,7 @@ if __name__ == "__main__":
                     help="发送手动唤醒命令后退出(命令链路测试)")
     ap.add_argument("--duration", type=int, default=4, help="唤醒后录音秒数(默认4)")
     ap.add_argument("--no-playback", action="store_true", help="唤醒后不自动回放")
+    ap.add_argument("--set-wakeword", metavar="PINYIN",
+                    help='修改唤醒词, 拼音带声调, 如 "ni2 hao3 xiao3 wei1"(你好小微); 改完需重新插拔设备')
+    ap.add_argument("--threshold", default="900", help="唤醒阈值(默认900, 越大越难唤醒)")
     run_interact(ap.parse_args())
