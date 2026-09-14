@@ -24,6 +24,7 @@ voice_command_demo.py —— 语音命令控制：说“打开图片”打开 / 
     <lerobot-python> voice_command_demo.py                    # 默认 SenseVoice(实时文本+定稿)
     <lerobot-python> voice_command_demo.py --ui               # 实时 HUD 界面(PySide6)
     <lerobot-python> voice_command_demo.py --asr vosk         # 退回仅 Vosk(轻量, 逐段流式)
+    <lerobot-python> voice_command_demo.py --fallback-say "没听懂"   # 自定义兜底播报语(留空关闭)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
@@ -78,6 +79,7 @@ PRE_ROLL_SEC = 1.2        # 预滚时长: 唤醒瞬间回溯这段时间的音�
 _stop = threading.Event()  # 界面关闭/退出信号
 _wake_q = queue.Queue()    # 串口线程 -> 业务线程: (角度, beam, score)
 _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确提示并忽略
+_tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
 
@@ -176,6 +178,15 @@ def dispatch(text: str):
             return True
     log(f"[命令] 未匹配到动作: {text!r}")
     return False
+
+
+def tts_speak(text: str):
+    """懒加载 TTS 并播报(首次在线合成后缓存, 之后离线可播)"""
+    global _tts_speak
+    if _tts_speak is None:
+        from tts import speak as _speak
+        _tts_speak = _speak
+    return _tts_speak(text)
 
 
 # ---------------------------------------------------------------- Vosk 识别
@@ -521,12 +532,20 @@ def run_live(args, rec):
                       f"→ 请说命令词(如「打开图片」)", "awake")
             wav = os.path.join(AUDIO_DIR, time.strftime("cmd_%Y%m%d_%H%M%S.wav"))
             text = stream_recognize(rec, args.duration, wav)
-            if not text:
-                log_state("未识别到命令词，回到监听中", "listen")
-            elif dispatch(text):
+            if text and dispatch(text):
                 log_state("已执行命令，回到监听中", "done")
             else:
-                log_state("未匹配到命令，回到监听中", "listen")
+                # 兜底: 没听懂/无法处理的命令 -> 用 TTS 播报提示
+                reason = "未识别到命令词" if not text else f"未匹配到命令: {text}"
+                if args.fallback_say:
+                    log_state(f"{reason} → 播报提示「{args.fallback_say}」", "warn")
+                    try:
+                        tts_speak(args.fallback_say)
+                    except Exception as e:
+                        log(f"[警告] 提示播报失败: {type(e).__name__}: {e}")
+                    log_state("播报完成，回到监听中", "listen")
+                else:
+                    log_state(f"{reason}，回到监听中", "listen")
         finally:
             _busy.clear()
         last_beat_t = time.time()
@@ -622,6 +641,8 @@ if __name__ == "__main__":
                     help="打开实时 HUD 界面(PySide6): 环形角度雷达 + 频谱瀑布图 + 状态提示 + 日志")
     ap.add_argument("--asr", choices=["sv", "vosk"], default="sv",
                     help="识别引擎: sv=SenseVoice(实时文本+定稿, 推荐); vosk=仅 Vosk(轻量)")
+    ap.add_argument("--fallback-say", default="暂时还处理不了",
+                    help="命令无法处理时用 TTS 播报的提示语(留空则关闭兜底播报)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
@@ -640,6 +661,16 @@ if __name__ == "__main__":
             log(f"[警告] SenseVoice 不可用({type(e).__name__}: {e}), 退回 Vosk 模式")
             a.asr = "vosk"
     rec = load_recognizer() if a.asr == "vosk" else None
+    if a.fallback_say and not a.wav:             # 预热兜底提示音(后台合成, 不阻塞启动)
+        def _prewarm():
+            try:
+                from tts import prewarm
+                ok = prewarm(a.fallback_say)
+                log(f"[TTS] 兜底提示音{'已就绪' if ok else '预热失败(将在首次使用时合成)'}: "
+                    f"「{a.fallback_say}」")
+            except Exception as e:
+                log(f"[警告] TTS 预热失败: {type(e).__name__}: {e}")
+        threading.Thread(target=_prewarm, daemon=True).start()
 
     if a.wav:
         if _sv is not None:
