@@ -9,6 +9,10 @@ voice_command_demo.py —— 语音命令控制：
 咖啡任务: 说“给我倒杯咖啡”会新开一个 gnome-terminal 窗口跑推理脚本, 日志在窗口里实时可见;
       窗口里先按回车开始, 运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断。
 
+大模型兜底(默认开): 命令词都没匹配上时, 把原话交给 DeepSeek 回答并播报(reply 仅播报,
+      不执行任何动作)。key 取 DEEPSEEK_API_KEY 环境变量或本目录 .deepseek_key 文件;
+      都没配则为"桩模式"(回一句固定话术), 便于先跑通链路。用 --no-llm 可关闭。
+
 日志: 所有状态带时间戳实时输出, 常用状态提示:
       [状态] 监听中 / 已唤醒 / 识别中(带剩余秒数, 原地刷新) / 识别结果 / 已执行命令
       [诊断] 每 30s 汇总收帧情况(握手帧/设备事件/唤醒/忽略), 用于判断"喊了没反应"
@@ -29,6 +33,7 @@ voice_command_demo.py —— 语音命令控制：
     <lerobot-python> voice_command_demo.py --ui               # 实时 HUD 界面(PySide6)
     <lerobot-python> voice_command_demo.py --asr vosk         # 退回仅 Vosk(轻量, 逐段流式)
     <lerobot-python> voice_command_demo.py --fallback-say "没听懂"   # 自定义兜底播报语(留空关闭)
+    <lerobot-python> voice_command_demo.py --no-llm           # 关闭大模型兜底(只播兜底语)
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
@@ -90,6 +95,7 @@ _stop = threading.Event()  # 界面关闭/退出信号
 _wake_q = queue.Queue()    # 串口线程 -> 业务线程: (角度, beam, score)
 _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确提示并忽略
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
+_tts_lock = threading.Lock()   # 播报串行化: 防止两段语音同时播放叠在一起
 
 # ---- 咖啡任务(机械臂推理脚本) ----
 # 在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里按键提前终止
@@ -265,7 +271,8 @@ def tts_speak(text: str):
     if _tts_speak is None:
         from tts import speak as _speak
         _tts_speak = _speak
-    return _tts_speak(text)
+    with _tts_lock:            # 串行化播报, 避免两段语音叠在一起(如"我想想"和回复)
+        return _tts_speak(text)
 
 
 def tts_speak_async(text: str):
@@ -276,6 +283,33 @@ def tts_speak_async(text: str):
         except Exception as e:
             log(f"[警告] 提示播报失败: {type(e).__name__}: {e}")
     threading.Thread(target=_run, daemon=True).start()
+
+
+def ask_llm_and_speak(text: str) -> bool:
+    """命令词没匹配上 -> 交给 DeepSeek 回答并播报。返回是否成功播报"""
+    try:
+        from llm import ask, is_stub
+    except Exception as e:
+        log(f"[大模型] 模块不可用: {type(e).__name__}: {e}")
+        return False
+    if is_stub():
+        log("[大模型] 未配置 key, 桩模式(只回固定话术) —— "
+            "设置 DEEPSEEK_API_KEY 或写 .deepseek_key 即可接真模型")
+    log_state(f"命令词没匹配上，交给 DeepSeek：{text}", "recognize")
+    tts_speak_async("我想想")                 # 先给个反馈, 与请求并行
+    t0 = time.time()
+    try:
+        reply = ask(text)
+    except Exception as e:
+        log(f"[大模型] 调用失败: {e}")
+        return False
+    log_state(f"DeepSeek 回复（{time.time() - t0:.1f}s）：{reply}", "result")
+    try:
+        tts_speak(reply)
+    except Exception as e:
+        log(f"[警告] 回复播报失败: {type(e).__name__}: {e}")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- Vosk 识别
@@ -623,6 +657,8 @@ def run_live(args, rec):
             text = stream_recognize(rec, args.duration, wav)
             if text and dispatch(text):
                 log_state("已执行命令，回到监听中", "done")
+            elif text and args.llm and ask_llm_and_speak(text):
+                log_state("已播报大模型回复，回到监听中", "listen")
             else:
                 # 兜底: 没听懂/无法处理的命令 -> 用 TTS 播报提示
                 reason = "未识别到命令词" if not text else f"未匹配到命令: {text}"
@@ -732,11 +768,14 @@ if __name__ == "__main__":
                     help="识别引擎: sv=SenseVoice(实时文本+定稿, 推荐); vosk=仅 Vosk(轻量)")
     ap.add_argument("--fallback-say", default="暂时还处理不了",
                     help="命令无法处理时用 TTS 播报的提示语(留空则关闭兜底播报)")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="关闭大模型兜底: 命令词没匹配上时不问 DeepSeek, 直接播兜底语")
     ap.add_argument("--coffee-script", default=COFFEE_SCRIPT,
                     help="「给我倒杯咖啡」时在终端窗口里执行的机械臂推理脚本")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
+    a.llm = not a.no_llm               # 默认开启: 未命中命令词时交给 DeepSeek 问答
     COFFEE_SCRIPT = a.coffee_script
 
     if a.log_file:
