@@ -20,11 +20,16 @@ import time
 
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import (QColor, QConicalGradient, QFont, QFontDatabase,
-                           QLinearGradient, QPainter, QPainterPath, QPen,
-                           QRadialGradient, QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QSizePolicy, QTextEdit, QVBoxLayout,
-                               QWidget)
+                           QImage, QLinearGradient, QPainter, QPainterPath,
+                           QPen, QRadialGradient, QTextCharFormat, QTextCursor)
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
+                               QHBoxLayout, QLabel, QMainWindow, QSizePolicy,
+                               QTextEdit, QVBoxLayout, QWidget)
+
+try:
+    import numpy as _np                      # 瀑布图用 FFT
+except Exception:
+    _np = None
 
 # 角度->屏幕映射(如与实际方向不符, 只改这两个常量)
 ANGLE_ZERO_AT_TOP = True
@@ -33,6 +38,7 @@ ANGLE_CLOCKWISE = True
 HISTORY_LEN = 24
 MAX_LOG_LINES = 500
 POLL_MS = 16                     # ~60fps
+WAV_RATE = 16000                 # 与采集/识别一致(16kHz 单声道 S16LE)
 
 # ---------------------------------------------------------------- 配色
 BG = "#070b12"
@@ -234,12 +240,17 @@ class RadarWidget(QWidget):
         p.drawLine(QPointF(cx, cy), tip)
 
 
-# ---------------------------------------------------------------- 波形/频谱
-class WaveWidget(QWidget):
+# ---------------------------------------------------------------- 频谱瀑布图
+class WaterfallWidget(QWidget):
+    """实时频谱瀑布图: 横轴=时间(左旧右新), 纵轴=频率(下低上高), 颜色=能量(dB)"""
+
+    F_MIN, F_MAX = 80.0, 8000.0
+    DB_RANGE = 60.0          # 显示动态范围(dB)
+
     def __init__(self, hud):
         super().__init__()
         self.hud = hud
-        self.setMinimumSize(340, 130)
+        self.setMinimumSize(340, 190)
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -249,48 +260,55 @@ class WaveWidget(QWidget):
             p.end()
 
     def _paint(self, p):
-        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.Antialiasing, False)   # 瀑布图用硬边更清晰
         w, h = self.width(), self.height()
-        hw = int(h * 0.55)
         p.fillRect(0, 0, w, h, C(BG))
-        p.setPen(QPen(C(GRID, 200), 1))
-        p.drawLine(0, hw, w, hw)
+
+        pad_l, pad_b, pad_t, pad_r = 34, 14, 16, 12
+        gw, gh = w - pad_l - pad_r, h - pad_b - pad_t
+        wf = self.hud._wf
+        if wf is not None and _np is not None and wf.size:
+            flip = _np.flipud(wf)                        # 低频放底部
+            rgb = self.hud._lut[flip]                    # (bands, cols, 3) uint8
+            rgb = _np.ascontiguousarray(rgb)
+            img = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1],
+                         QImage.Format_RGB888)
+            p.drawImage(QRectF(pad_l, pad_t, gw, gh), img)
+        else:
+            p.setPen(QPen(C(DIM)))
+            p.setFont(QFont(self.hud.mono_family, 10))
+            p.drawText(QRectF(pad_l, pad_t, gw, gh), Qt.AlignCenter,
+                       "等待音频…" if _np is not None else "需要 numpy 才能绘制瀑布图")
+
+        # 边框 + 频率刻度
+        p.setPen(QPen(C(GRID, 220), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(pad_l, pad_t, gw, gh))
         p.setFont(QFont(self.hud.mono_family, 8))
         p.setPen(QPen(C(DIM)))
-        p.drawText(6, 12, "WAVE")
-        p.drawText(6, hw + 14, "SPECTRUM")
-
-        s = self.hud._samples
-        if len(s) > 8:
-            step = max(1, len(s) // w)
-            path = QPainterPath()
-            for x in range(w):
-                v = s[min(len(s) - 1, x * step)] / 32768.0
-                y = hw / 2 - v * (hw / 2 - 8)
-                if x == 0:
-                    path.moveTo(x, y)
-                else:
-                    path.lineTo(x, y)
-            p.setPen(QPen(C(CYAN, 60), 3.2))
-            p.drawPath(path)
-            p.setPen(QPen(C(CYAN), 1.2))
-            p.drawPath(path)
-
-        bars = self.hud.spectrum(32)
-        bw = w / len(bars)
-        base = h - 5
-        for i, m in enumerate(bars):
-            bh = int((h - hw - 18) * m)
-            if bh <= 0:
-                continue
-            x = i * bw
-            lg = QLinearGradient(0, base - bh, 0, base)
-            lg.setColorAt(0.0, C(RED, 220))
-            lg.setColorAt(0.5, C(AMBER, 200))
-            lg.setColorAt(1.0, C(BLUE, 190))
-            p.setBrush(lg)
-            p.setPen(Qt.NoPen)
-            p.drawRect(QRectF(x + 1, base - bh, bw - 2, bh))
+        for f in (0, 2000, 4000, 6000, 8000):
+            frac = (math.log10(max(f, self.F_MIN)) - math.log10(self.F_MIN)) / \
+                   (math.log10(self.F_MAX) - math.log10(self.F_MIN)) if f > 0 else 0.0
+            y = pad_t + gh * (1 - frac)
+            p.drawText(QRectF(2, y - 6, pad_l - 6, 12), Qt.AlignRight | Qt.AlignVCenter,
+                       ("%dk" % (f // 1000)) if f else "80")
+            p.setPen(QPen(C(GRID, 160), 1))
+            p.drawLine(QPointF(pad_l, y), QPointF(pad_l + gw, y))
+            p.setPen(QPen(C(DIM)))
+        # 峰值频率
+        p.setFont(QFont(self.hud.mono_family, 9))
+        p.setPen(QPen(C(CYAN)))
+        p.drawText(QRectF(pad_l + 6, pad_t + 2, gw - 12, 14), Qt.AlignLeft,
+                   "峰值 %.2f kHz" % (self.hud._peak_hz / 1000.0))
+        # 色标
+        lw = 8
+        lx = w - pad_r - lw + 2 if w - pad_r + lw < w else w - lw - 2
+        for i in range(int(gh)):
+            v = 255 - int(255 * i / max(1, gh - 1))       # 顶亮底暗
+            c = QColor(*[int(x) for x in self.hud._lut[v]])
+            p.setPen(QPen(c))
+            p.drawLine(QPointF(lx, pad_t + i), QPointF(lx + lw, pad_t + i))
+        p.setPen(Qt.NoPen)
 
 
 # ---------------------------------------------------------------- 主窗口
@@ -319,12 +337,17 @@ class HudWindow(QMainWindow):
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
 
-        # 标题行
+        # 标题行 + LIVE 状态指示灯
         head = QHBoxLayout()
         t = QLabel("M260C   SOUND   LOCALIZATION")
         t.setObjectName("title")
         t.setFont(QFont(hud.mono_family, 13, QFont.Bold))
         head.addWidget(t)
+        self.lbl_live = QLabel("● LIVE")
+        self.lbl_live.setFont(QFont(hud.mono_family, 10, QFont.Bold))
+        self.lbl_live.setStyleSheet(f"color:{GREEN};")
+        head.addSpacing(10)
+        head.addWidget(self.lbl_live)
         head.addStretch(1)
         self.lbl_stats = QLabel("")
         self.lbl_stats.setObjectName("dim")
@@ -352,6 +375,13 @@ class HudWindow(QMainWindow):
         sl.addSpacing(10)
         sl.addWidget(self.lbl_status, 1)
         lay.addWidget(sbar)
+        # 状态条 + 雷达: 加青色辉光(Qt 原生阴影效果)
+        for widget in (sbar,):
+            eff = QGraphicsDropShadowEffect(widget)
+            eff.setBlurRadius(26)
+            eff.setColor(QColor(0, 229, 255, 70))
+            eff.setOffset(0, 0)
+            widget.setGraphicsEffect(eff)
 
         # 中部: 雷达 | 右侧信息
         mid = QHBoxLayout()
@@ -380,8 +410,8 @@ class HudWindow(QMainWindow):
         self.lbl_partial.setWordWrap(True)
         panel("实时识别文本", self.lbl_partial)
 
-        self.wave = WaveWidget(hud)
-        panel("波形 / 频谱 (16kHz)", self.wave)
+        self.wave = WaterfallWidget(hud)
+        panel("实时频谱瀑布图 (80Hz–8kHz)", self.wave)
 
         self.lbl_hint = QLabel("说「小宽小宽」唤醒 → 说「打开图片」/「关闭图片」")
         self.lbl_hint.setWordWrap(True)
@@ -438,7 +468,14 @@ class SoundRadarHUD:
         self.beam = None
         self.score = None
         self._level = 0.0           # 注意不要与方法 level() 同名
-        self._samples = []          # 滚动音频缓冲(注意不要与方法 samples() 同名)
+        # 瀑布图状态
+        self.WF_BANDS, self.WF_COLS = 72, 200
+        self._wf = None
+        self._fft_ring = _np.zeros(1024, dtype=_np.float32) if _np is not None else None
+        self._peak_hz = 0.0
+        self._lut = self._build_lut()
+        self._blink = 0
+        self._kind = "info"
         self.sweep = 0.0
         self.active = False
         self.history = []
@@ -503,6 +540,14 @@ class SoundRadarHUD:
             self._pending_logs.clear()
         self.win.radar.update()
         self.win.wave.update()
+        # LIVE 指示灯: 监听时缓慢呼吸, 识别时快闪
+        self._blink = (self._blink + 1) % 100
+        if self._kind == "recognize":
+            on = (self._blink % 12) < 8
+        else:
+            on = (self._blink % 60) < 44
+        self.win.lbl_live.setStyleSheet(
+            f"color:{self._kind_color(self._kind) if on else PANEL};")
 
     def _drain(self):
         while True:
@@ -513,6 +558,7 @@ class SoundRadarHUD:
             if kind == "state":
                 text, st = p
                 color = self._kind_color(st)
+                self._kind = st
                 self.win.lbl_status.setText(text)
                 self.win.lbl_status.setStyleSheet(f"color:{color};")
                 self.win.acc.setStyleSheet(f"background:{color};")
@@ -575,36 +621,60 @@ class SoundRadarHUD:
             cur.deleteChar()
         self.win.log.moveCursor(QTextCursor.End)
 
-    def _push_samples(self, chunk):
-        from array import array
-        a = array("h")
-        a.frombytes(chunk[:len(chunk) // 2 * 2])
-        if not a:
-            return
-        step = max(1, len(a) // 400)
-        self._samples.extend(a[i] for i in range(0, len(a), step))
-        if len(self._samples) > 4000:
-            del self._samples[:-4000]
+    @staticmethod
+    def _build_lut():
+        """瀑布图色标: 深蓝 -> 蓝 -> 青 -> 绿 -> 黄 -> 红 (256 级)"""
+        stops = [(0.00, (5, 8, 16)), (0.18, (16, 42, 94)), (0.38, (14, 108, 148)),
+                 (0.56, (22, 196, 176)), (0.74, (208, 226, 74)), (0.88, (255, 158, 60)),
+                 (1.00, (255, 64, 84))]
+        out = []
+        for i in range(256):
+            t = i / 255.0
+            for k in range(len(stops) - 1):
+                t0, c0 = stops[k]
+                t1, c1 = stops[k + 1]
+                if t0 <= t <= t1:
+                    f = (t - t0) / (t1 - t0)
+                    out.append(tuple(int(round(c0[j] + (c1[j] - c0[j]) * f))
+                                     for j in range(3)))
+                    break
+            else:
+                out.append(stops[-1][1])
+        if _np is not None:
+            return _np.array(out, dtype=_np.uint8)
+        return out
 
-    def spectrum(self, bars):
-        """32 段频谱(FFT 优先)"""
-        if len(self._samples) < 512:
-            return [0.0] * bars
-        try:
-            import numpy as np
-            x = np.asarray(self._samples[-4096:], dtype=np.float32) / 32768.0
-            spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
-            idx = np.linspace(0, min(len(spec) - 1, 900), bars + 1).astype(int)
-            out = [float(spec[idx[i]:max(idx[i] + 1, idx[i + 1])].max())
-                   for i in range(bars)]
-            mx = max(out) or 1.0
-            return [min(1.0, v / mx) for v in out]
-        except Exception:
-            n = len(self._samples)
-            blk = max(1, n // bars)
-            return [min(1.0, (sum(abs(v) for v in (self._samples[i * blk:(i + 1) * blk] or [0]))
-                               / max(1, len(self._samples[i * blk:(i + 1) * blk]))) / 9000.0)
-                    for i in range(bars)]
+    def _push_samples(self, chunk):
+        """原始音频块 -> FFT -> 瀑布图新列(左移, 右端追加)"""
+        if _np is None or self._fft_ring is None:
+            return
+        raw = chunk[:len(chunk) // 2 * 2]
+        a = _np.frombuffer(raw, dtype="<i2").astype(_np.float32) / 32768.0
+        if a.size < 64:
+            return
+        n = min(a.size, self._fft_ring.size)
+        self._fft_ring = _np.roll(self._fft_ring, -n)
+        self._fft_ring[-n:] = a[-n:]
+
+        spec = _np.abs(_np.fft.rfft(self._fft_ring * _np.hanning(self._fft_ring.size)))
+        freqs = _np.fft.rfftfreq(self._fft_ring.size, 1.0 / WAV_RATE)
+        bands = self.WF_BANDS
+        edges = _np.logspace(math.log10(WaterfallWidget.F_MIN),
+                             math.log10(WaterfallWidget.F_MAX), bands + 1)
+        col = _np.zeros(bands, dtype=_np.float32)
+        for i in range(bands):
+            m = (freqs >= edges[i]) & (freqs < edges[i + 1])
+            col[i] = spec[m].max() if m.any() else 0.0
+        db = 20.0 * _np.log10(col + 1e-6)
+        val = _np.clip((db + WaterfallWidget.DB_RANGE + 10.0) /
+                       WaterfallWidget.DB_RANGE, 0.0, 1.0) * 255.0
+        if self._wf is None:
+            self._wf = _np.zeros((bands, self.WF_COLS), dtype=_np.uint8)
+        self._wf[:, :-1] = self._wf[:, 1:]
+        self._wf[:, -1] = val.astype(_np.uint8)
+        # 峰值频率(用于界面右上角显示)
+        if col.max() > 0:
+            self._peak_hz = float(freqs[int(col.argmax())])
 
 
 def demo_preview(seconds: int = 30):
@@ -627,10 +697,12 @@ def demo_preview(seconds: int = 30):
         state["deg"] = (state["deg"] + random.uniform(10, 120)) % 360
         d = state["deg"]
         hud.angle(d, int(d // 60) % 6, random.randint(1000, 1600))
+        # 扫频音(300Hz~3.5kHz) + 底噪: 让瀑布图出现流动的亮线
         state["phase"] += 1
-        buf = b"".join(struct.pack("<h", int(9000 * math.sin(
-            2 * math.pi * (4 + state["phase"] % 5) * i / 160)
-            * random.uniform(0.6, 1.0))) for i in range(800))
+        sweep_hz = 300 + 3200 * (0.5 + 0.5 * math.sin(state["phase"] / 12.0))
+        buf = b"".join(struct.pack("<h", int((7000 * math.sin(
+            2 * math.pi * sweep_hz * i / 16000)) + random.uniform(-1500, 1500)))
+            for i in range(800))
         hud.samples(buf)
         hud.level(random.uniform(0.1, 0.95))
         hud.partial(random.choice(partials), remain=3)
