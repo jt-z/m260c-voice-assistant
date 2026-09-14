@@ -36,5 +36,20 @@ class SenseVoice:
         """识别 16k 单声道 WAV, 返回去掉标记/标点的纯中文文本"""
         res = self.model.generate(input=wav_path, cache={}, language="zh",
                                   use_itn=True, batch_size_s=60)
-        text = res[0]["text"] if res else ""
-        return _PUNC.sub("", _TAG.sub("", text))
+        return _clean(res)
+
+    def decode_pcm(self, pcm: bytes) -> str:
+        """识别内存里的 S16LE 16k 单声道 PCM(用于滚动重解码, 不必写临时文件)"""
+        import numpy as np
+        raw = pcm[:len(pcm) // 2 * 2]
+        a = np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+        if a.size < 3200:                     # 少于 0.1s 不值得解码
+            return ""
+        res = self.model.generate(input=a, fs=16000, cache={}, language="zh",
+                                  use_itn=True)
+        return _clean(res)
+
+
+def _clean(res) -> str:
+    text = res[0]["text"] if res else ""
+    return _PUNC.sub("", _TAG.sub("", text))

@@ -241,14 +241,56 @@ def build_stream_cmd(seconds=None):
 
 
 def stream_recognize(rec, seconds: int, wav_path: str):
-    """从常开采集抓取音频(含预滚)并实时喂给 Vosk; 结束后返回最终文本"""
+    """抓取音频(含预滚)并识别.
+
+    SenseVoice 模式(默认): 非流式引擎, 用"滚动重解码"近似实时 —— 每新增约 0.5s 音频
+                          就把整段重解一次, 界面/终端文本逐步增长; 结束时以完整音频定稿.
+    Vosk 模式(--asr vosk): 保持原有逐段流式识别.
+    """
     pre = _capture.pre_roll if _capture else 0.0
-    log_state(f"识别中：采集 {seconds}s + 预滚 {pre:.1f}s, 请说命令词…", "recognize")
-    rec.Reset()
-    segments = []
-    shown = ""            # 上一次刷新的整行内容, 用于原地覆盖
-    peak = 0.0
+    engine = "SenseVoice 实时" if _sv is not None else "Vosk"
+    log_state(f"识别中({engine})：采集 {seconds}s + 预滚 {pre:.1f}s, 请说命令词…",
+              "recognize")
     t0 = time.time()
+    pcm = bytearray()
+    lock = threading.Lock()
+    state = {"remain": seconds, "live": ""}
+
+    def push_live(text):
+        """把实时文本同时送到终端(原地刷新)与界面"""
+        state["live"] = text
+        if _ui:
+            _ui.partial(text, state["remain"])
+        line = f"[识别中] 剩余{state['remain']}s"
+        if text:
+            line += f" 「{text}」"
+        print("\r" + line, end="", flush=True)
+
+    live_thread = None
+    stop_live = threading.Event()
+    if _sv is not None:                      # 启动滚动重解码线程
+        def _live_loop():
+            decoded = 0
+            while not stop_live.is_set():
+                with lock:
+                    data = bytes(pcm)
+                if len(data) - decoded >= int(0.5 * 32000):
+                    decoded = len(data)
+                    try:
+                        t = _sv.decode_pcm(data)
+                        if t:
+                            push_live(t)
+                    except Exception:
+                        pass
+                stop_live.wait(0.1)
+        live_thread = threading.Thread(target=_live_loop, daemon=True)
+        live_thread.start()
+        rec = None                           # sv 模式下不需要 Vosk
+
+    if rec is not None:
+        rec.Reset()
+        segments = []
+
     with wave.open(wav_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -257,52 +299,54 @@ def stream_recognize(rec, seconds: int, wav_path: str):
             if _stop.is_set():
                 break
             wf.writeframes(chunk)
-            # 预滚部分已发生, 剩余时间只按唤醒后的部分计
+            with lock:
+                pcm += chunk
             heard = max(0.0, time.time() - t0 - pre)
-            remain = max(0, int(seconds - heard))
-            rms = _rms_norm(chunk)
-            peak = max(peak, rms)
-            if _ui:
-                _ui.level(peak)
-            if rec.AcceptWaveform(chunk):
-                seg = parse_text(rec.Result())         # 分段定稿, 实时打印
-                if seg:
-                    _clear_line(shown)
-                    shown = ""
-                    segments.append(seg)
-                    log(f"[识别] 结果片段: {seg}")
-            else:
-                cur = json.loads(rec.PartialResult()).get("partial", "").replace(" ", "")
-                cur = cur.replace("[unk]", "")
-                if _ui:
-                    _ui.partial(cur, remain)
-                line = f"[识别中] 剩余{remain}s"
-                if cur:
-                    line += f" 「{cur}」"
-                if line != shown:                      # 原地刷新, 不换行
-                    shown = line
-                    print("\r" + shown, end="", flush=True)
-    _clear_line(shown)
+            state["remain"] = max(0, int(seconds - heard))
+            if rec is not None:               # Vosk 流式路径
+                if rec.AcceptWaveform(chunk):
+                    seg = parse_text(rec.Result())
+                    if seg:
+                        segments.append(seg)
+                        log(f"[识别] 结果片段: {seg}")
+                else:
+                    cur = json.loads(rec.PartialResult()).get("partial", "")
+                    cur = cur.replace(" ", "").replace("[unk]", "")
+                    push_live(cur)
+            else:                             # sv 路径: 刷新倒计时(文本由解码线程更新)
+                push_live(state["live"])
+
+    # 收尾: 停掉滚动线程, 用完整音频定稿
+    stop_live.set()
+    if live_thread:
+        live_thread.join(timeout=2)
+    _clear_line_and_return(state["live"])
     if _ui:
         _ui.level(0.0)
         _ui.partial("")
-    # FinalResult 只含尾段, 需与已定稿分段拼接
-    vosk_text = "".join(segments) + parse_text(rec.FinalResult())
+
+    tail = parse_text(rec.FinalResult()) if rec is not None else ""
+    vosk_text = ("".join(segments) + tail) if rec is not None else ""
     text = vosk_text
-    if _sv is not None:                       # 最终解码交给 SenseVoice(更干净完整)
+    if _sv is not None:
         try:
-            t0 = time.time()
-            sv_text = _sv.decode(wav_path)
-            log(f"[识别] SenseVoice({(time.time()-t0)*1000:.0f}ms): "
+            t1 = time.time()
+            sv_text = _sv.decode_pcm(bytes(pcm)) if pcm else ""
+            log(f"[识别] SenseVoice 定稿({(time.time()-t1)*1000:.0f}ms): "
                 f"{sv_text or '(空)'}")
             if sv_text:
                 text = sv_text
-            else:
-                log("[识别] SenseVoice 无输出, 退回 Vosk 结果")
         except Exception as e:
-            log(f"[警告] SenseVoice 解码失败({type(e).__name__}: {e}), 退回 Vosk 结果")
+            log(f"[警告] SenseVoice 定稿失败({type(e).__name__}: {e})")
     log_state(f"识别结果：{text or '(无有效语音)'}", "result" if text else "warn")
     return text
+
+
+def _clear_line_and_return(shown: str):
+    """清除终端里的原地刷新行"""
+    if shown:
+        print("\r" + " " * (len(shown) + 24) + "\r", end="", flush=True)
+    return shown
 
 
 def _rms_norm(chunk: bytes) -> float:
@@ -580,8 +624,8 @@ if __name__ == "__main__":
     ap.add_argument("--log-file", help="同时把日志写入该文件")
     ap.add_argument("--ui", action="store_true",
                     help="打开实时 HUD 界面(PySide6): 环形角度雷达 + 频谱瀑布图 + 状态提示 + 日志")
-    ap.add_argument("--asr", choices=["hybrid", "vosk"], default="hybrid",
-                    help="识别引擎: hybrid=Vosk 实时逐字 + SenseVoice 最终解码(推荐); vosk=仅 Vosk(轻量)")
+    ap.add_argument("--asr", choices=["sv", "vosk"], default="sv",
+                    help="识别引擎: sv=SenseVoice(实时文本+定稿, 推荐); vosk=仅 Vosk(轻量)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
@@ -590,17 +634,22 @@ if __name__ == "__main__":
     # Qt 的 xcb 兜底可能重启自身, 必须在加载模型之前完成, 否则模型会被加载两次
     if a.ui and not a.wav:
         _ensure_qt_libs()
-    if a.asr == "hybrid" and not a.wav:          # 最终解码引擎(加载约 1~2s)
+    if a.asr == "sv":                            # SenseVoice: 实时文本 + 定稿都走它
         try:
             from asr_sensevoice import SenseVoice
-            log("[识别] 加载 SenseVoice 最终解码引擎…")
+            log("[识别] 加载 SenseVoice(加载约 5~6s)…")
             _sv = SenseVoice()
-            log("[识别] SenseVoice 就绪(CPU)")
+            log("[识别] SenseVoice 就绪(CPU, 实时文本用滚动重解码)")
         except Exception as e:
-            log(f"[警告] SenseVoice 不可用({type(e).__name__}: {e}), 退回仅 Vosk 模式")
-    rec = load_recognizer()
+            log(f"[警告] SenseVoice 不可用({type(e).__name__}: {e}), 退回 Vosk 模式")
+            a.asr = "vosk"
+    rec = load_recognizer() if a.asr == "vosk" else None
+
     if a.wav:
-        recognize_wav(rec, a.wav)
+        if _sv is not None:
+            log(f"[识别] {a.wav} -> {_sv.decode(a.wav) or '(空)'}")
+        else:
+            recognize_wav(rec, a.wav)
     elif a.ui:
         run_with_ui(a, rec)
     else:
