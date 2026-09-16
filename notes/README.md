@@ -1,7 +1,10 @@
-# voice_operate —— M260C 语音交互与命令控制
+# m260c-voice-assistant —— M260C 语音交互与命令控制
 
 Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形六麦阵列 + M2 系列降噪板），
 实现「唤醒 → 识别 → 执行命令 / 大模型问答 → 语音播报」的完整闭环，并可驱动机器人臂完成任务。
+
+> 项目概览与快速上手见仓库首页 [../README.md](../README.md)（English: [../README.en.md](../README.en.md)）；
+> 本目录是深入的技术文档。
 
 ---
 
@@ -127,7 +130,7 @@ llm.py "你好"
 ## 相关路径
 
 ```
-/home/kf/dev/voice_operate/          本项目
+/home/kf/dev/m260c-voice-assistant/   本项目
 ├── audio/                           录音存档 + TTS 缓存（audio/tts_cache/）
 ├── models/                          Vosk 模型
 ├── notes/                           本目录（文档）

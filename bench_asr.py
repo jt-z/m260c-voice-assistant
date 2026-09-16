@@ -20,7 +20,9 @@ import sys
 import time
 import wave
 
-WAVS_DIR = "/home/kf/dev/voice_operate/audio"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAVS_DIR = os.path.join(PROJECT_DIR, "audio")
+VOSK_MODEL_DIR = os.path.join(PROJECT_DIR, "models", "vosk-model-small-cn-0.22")
 GRAMMAR = ('["打 开 图 片", "打 开 照 片", "看 一 下 图 片", '
            '"关 闭 图 片", "关 掉 图 片", "[unk]"]')
 HIT_KEYS = ("打开", "关闭", "看图", "图片", "照片", "关掉")
@@ -38,7 +40,7 @@ def wav_files(limit=None):
 def vosk_factory():
     from vosk import Model, KaldiRecognizer, SetLogLevel
     SetLogLevel(-1)
-    model = Model("/home/kf/dev/voice_operate/models/vosk-model-small-cn-0.22")
+    model = Model(VOSK_MODEL_DIR)
 
     def run(path):
         rec = KaldiRecognizer(model, 16000, GRAMMAR)

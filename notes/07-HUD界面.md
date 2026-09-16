@@ -51,6 +51,14 @@ ui.run()                        # 进入 Qt 事件循环（阻塞）
 
 ## 3. 渲染与视觉
 
+界面截图（`../ui/`，由本仓库直接提供）：
+
+| 声源雷达 | 频谱瀑布图 |
+|---|---|
+| ![雷达](../ui/hud_radar.png) | ![瀑布图](../ui/hud_waterfall.png) |
+
+整体效果见 [hud_screenshot.png](../ui/hud_screenshot.png)，无硬件预览效果见 [hud_preview.png](../ui/hud_preview.png)（`python sound_radar_hud.py 30`）。
+
 ```python
 ANGLE_ZERO_AT_TOP = True      # 0° 在正上方（而不是数学上的右侧）
 ANGLE_CLOCKWISE   = True      # 角度顺时针增大
