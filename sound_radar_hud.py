@@ -15,13 +15,15 @@ Qt 相比 Tk 的优势(本次用到): QPainter 抗锯齿、径向/线性/锥形�
 import math
 import os
 import queue
+import random
 import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import (QColor, QConicalGradient, QFont, QFontDatabase,
-                           QImage, QLinearGradient, QPainter, QPainterPath,
-                           QPen, QRadialGradient, QTextCharFormat, QTextCursor)
+                           QFontMetrics, QImage, QLinearGradient, QPainter,
+                           QPainterPath, QPen, QPixmap, QRadialGradient,
+                           QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QMainWindow, QSizePolicy,
                                QTextEdit, QVBoxLayout, QWidget)
@@ -53,12 +55,293 @@ TEXT = "#c9d8ea"
 DIM = "#5d7896"
 WHITE = "#eaf6ff"
 
+# 字符雨(黑客帝国数字雨)配色: 以翠绿为主, 少量青/紫做霓虹点缀
+RAIN_HUES = (("#00ff66", 66), ("#00e0ff", 24), ("#a86bff", 10))   # (色相, 权重)
+RAIN_ALPHA = 0.72          # 静音时的整体不透明度(压暗以免干扰读数)
+RAIN_ALPHA_MAX = 0.96      # 音量最大时的不透明度 → 音频联动
+RAIN_RMS_GAIN = 1.6        # 音量增益(识别模块的 RMS 偏小, 放大后再用)
+RAIN_SPEED_BOOST = 1.6     # 音量对下落速度的加成倍率
+
+# CRT 叠层的 RGB 色差(RGB 分离)分色: 亮格左右各错开 1px 画一层
+RAIN_FRINGE_R = "#ff2f55"  # 左偏移: 红
+RAIN_FRINGE_B = "#2bd8ff"  # 右偏移: 青蓝
+
 
 def C(hexstr, alpha=255):
     """带透明度的 QColor(alpha 是 Qt 原生能力, Tk 做不到)"""
     c = QColor(hexstr)
     c.setAlpha(alpha)
     return c
+
+
+def _mix(hexstr, other, k):
+    """线性混色: k=0 取 hexstr, k=1 取 other"""
+    a, b = QColor(hexstr), QColor(other)
+    return QColor(round(a.red() + (b.red() - a.red()) * k),
+                  round(a.green() + (b.green() - a.green()) * k),
+                  round(a.blue() + (b.blue() - a.blue()) * k))
+
+
+# ---------------------------------------------------------------- 字符雨背景
+class MatrixRain:
+    """黑客帝国风格「数字雨」加强版:
+
+    - 霓虹纵深: 每列自带色相(翠绿/青/紫)与远近层次(远列更暗更慢), 不是一片死绿
+    - 下落头白热 + 三层辉光光晕, 拖尾按亮度渐隐
+    - 数据流抖动: 拖尾里的字符随机改写, 偶发白色 glitch 火花
+    - CRT 色差: 亮格左右错开画红/青
+    - 音频联动: 声音越大整体越亮、下落越快(boost 由 hud._level 驱动)
+
+    用网格(列×行)记录每格亮度 level, 每次 step() 整体衰减并点亮新的头部,
+    亮度越低颜色越暗 → 形成拖尾。由 HUD 的 QTimer 驱动 step()。
+    """
+
+    # 下落字符集: 以 0/1 二进制为主(重复计数=提高权重, 约占 1/3), 再混数字/字母/符号/片假名
+    GLYPHS = ("0" * 24 + "1" * 24
+              + "23456789"
+              + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              + "<>/\\|{}[]()=+*-_.,:;$#%@&"
+              + "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ")
+    DECAY = 0.075          # 每步亮度衰减 → 决定拖尾长度(约 13 格)
+    MIN_LEVEL = 0.06       # 低于此亮度不绘制
+    FRINGE_MIN = 0.35      # 亮度高于此值才画 RGB 色差边缘(省开销)
+    FRINGE_PX = 1.3        # 色差左右偏移(像素)
+    TIERS = (1.0, 0.74, 0.52)     # 纵深层次: 近/中/远 的亮度与速度系数
+    HEAD_LV = 1.0          # 头部亮度
+    SPARK_LV = 1.35        # glitch 火花亮度(>1 表示按白光渲染)
+    SPARK_MIN = 1.05       # 高于此亮度按过曝白光画
+    CHURN = 0.08           # 每列每步随机改写字符的概率(数据流抖动)
+    HALO = ((1.55, 22), (1.0, 42), (0.6, 78))    # 头部辉光: (半径系数, alpha)
+    BOOST_STEPS = 5        # 音频联动量化级数 → 预生成颜色表, 免每帧新建
+
+    def __init__(self, pt=11):
+        self.pt = pt
+        self.size = (0, 0)
+        self.cw, self.ch = 14, 18
+        self.cols = self.rows = 0
+        self.chars = []        # 每格字符
+        self.level = []        # 每格亮度 0~1(>1 = glitch 火花)
+        self.head = []         # 每列头部所在行(浮点, 可为负=尚未入画)
+        self.speed = []        # 每列下落速度(格/步)
+        self.hue = []          # 每列色相索引
+        self.tier = []         # 每列纵深层次索引
+        self.boost = 0.0       # 平滑后的音频强度 0~1
+        # 预生成调色板, 避免每帧新建 QColor
+        self._pal = {}         # (色相, 层次) -> 33 级拖尾色
+        self._head = []        # 色相 -> 头部亮白
+        self._halo = []        # 色相 -> [音频级] -> 三层辉光色
+        for hi, (hexi, _w) in enumerate(RAIN_HUES):
+            self._head.append(_mix(hexi, "#ffffff", 0.8))
+            self._halo.append([[C(hexi, int(a * k)) for _r, a in self.HALO]
+                               for k in self._boost_curve()])
+            for ti, k in enumerate(self.TIERS):
+                self._pal[(hi, ti)] = self._mk_pal(hexi, k)
+        self._pal_r = self._mk_pal(RAIN_FRINGE_R, 0.5)
+        self._pal_b = self._mk_pal(RAIN_FRINGE_B, 0.5)
+
+    @classmethod
+    def _boost_curve(cls):
+        """音量 0~1 对应的辉光亮度系数(量化成几档, 便于预生成颜色)"""
+        n = cls.BOOST_STEPS - 1
+        return [0.55 + 0.85 * i / n for i in range(cls.BOOST_STEPS)]
+
+    @staticmethod
+    def _mk_pal(hexstr, k):
+        pal = []
+        for i in range(33):
+            c = QColor(hexstr)
+            c.setAlpha(max(26, int(230 * i / 32 * k)))
+            pal.append(c)
+        return pal
+
+    def _rnd_speed(self, tier):
+        return random.uniform(0.25, 0.85) * self.TIERS[tier]
+
+    def _reset(self, w, h, fm):
+        self.cw = max(9, fm.horizontalAdvance("0") + 2)
+        self.ch = max(12, fm.height())
+        self.cols = max(1, w // self.cw)
+        self.rows = max(2, h // self.ch + 2)
+        self.chars = [[random.choice(self.GLYPHS) for _ in range(self.rows)]
+                      for _ in range(self.cols)]
+        self.level = [[0.0] * self.rows for _ in range(self.cols)]
+        self.head = [random.uniform(-self.rows, 0.0) for _ in range(self.cols)]
+        self.hue = random.choices(range(len(RAIN_HUES)),
+                                  weights=[w for _c, w in RAIN_HUES],
+                                  k=self.cols)
+        self.tier = [random.randrange(len(self.TIERS)) for _ in range(self.cols)]
+        self.speed = [self._rnd_speed(t) for t in self.tier]
+        self.size = (w, h)
+
+    def step(self, rms=0.0):
+        """推进一帧: 全网格衰减 + 各列头部下落/换新字符 + 音量联动"""
+        boost = min(1.0, max(0.0, rms) * RAIN_RMS_GAIN)
+        self.boost += (boost - self.boost) * 0.3
+        if not self.cols:
+            return
+        sp_k = 1.0 + RAIN_SPEED_BOOST * self.boost
+        for c in range(self.cols):
+            lv = self.level[c]
+            for r in range(self.rows):
+                if lv[r] > 0.0:
+                    lv[r] -= self.DECAY
+            self.head[c] += self.speed[c] * sp_k
+            row = int(self.head[c])
+            if 0 <= row < self.rows:
+                lv[row] = self.HEAD_LV
+                self.chars[c][row] = random.choice(self.GLYPHS)
+            elif self.head[c] > self.rows + 16:      # 落到画外 → 从顶部重新开始
+                self.head[c] = random.uniform(-self.rows * 0.6, -1.0)
+                self.speed[c] = self._rnd_speed(self.tier[c])
+            r2 = random.randrange(self.rows)
+            if random.random() < self.CHURN and lv[r2] > 0.12:
+                self.chars[c][r2] = random.choice(self.GLYPHS)   # 数据流抖动
+                if random.random() < 0.22:                       # 偶发 glitch 火花
+                    lv[r2] = self.SPARK_LV
+
+    def paint(self, p, w, h, family):
+        p.setFont(QFont(family, self.pt))
+        if (w, h) != self.size:
+            self._reset(w, h, QFontMetrics(QFont(family, self.pt)))
+        cw, ch = self.cw, self.ch
+        pal_r, pal_b = self._pal_r, self._pal_b
+        bstep = min(self.BOOST_STEPS - 1, int(self.boost * self.BOOST_STEPS))
+        for c in range(self.cols):
+            lv, chars = self.level[c], self.chars[c]
+            x = c * cw
+            pal = self._pal[(self.hue[c], self.tier[c])]
+            head = self._head[self.hue[c]]
+            halo = self._halo[self.hue[c]][bstep]
+            hr = int(self.head[c])                       # 头部所在行 → 画辉光
+            for r in range(self.rows):
+                b = lv[r]
+                if b <= self.MIN_LEVEL:
+                    continue
+                if r == hr:                              # 头部辉光: 三层同心圆
+                    p.setPen(Qt.NoPen)
+                    cy = r * ch + ch / 2
+                    for (rr, _a), col in zip(self.HALO, halo):
+                        p.setBrush(col)
+                        p.drawEllipse(QPointF(x + cw / 2, cy),
+                                      cw * 0.66 * rr, ch * 0.52 * rr)
+                idx = min(32, int(min(1.0, b) * 32))
+                rect = QRectF(x, r * ch, cw, ch)
+                if b > self.FRINGE_MIN:                  # CRT 色差: 左右错开画红/青
+                    p.setPen(QPen(pal_r[idx]))
+                    p.drawText(rect.translated(-self.FRINGE_PX, 0), Qt.AlignCenter,
+                               chars[r])
+                    p.setPen(QPen(pal_b[idx]))
+                    p.drawText(rect.translated(self.FRINGE_PX, 0), Qt.AlignCenter,
+                               chars[r])
+                if b > self.SPARK_MIN:                   # glitch 火花 → 过曝白光
+                    p.setPen(QPen(C(WHITE)))
+                elif b > 0.92:
+                    p.setPen(QPen(head))
+                else:
+                    p.setPen(QPen(pal[idx]))
+                p.drawText(rect, Qt.AlignCenter, chars[r])
+
+
+class RainBackdrop(QWidget):
+    """根容器: 铺一层字符雨背景, 半透明面板/雷达叠加其上"""
+
+    def __init__(self, hud):
+        super().__init__()
+        self.hud = hud
+        self.rain = MatrixRain()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            p.fillRect(0, 0, w, h, C(BG))
+            glow = QRadialGradient(QPointF(w / 2, h / 2), max(w, h) * 0.7)
+            glow.setColorAt(0.0, C("#0e1c2e", 170))
+            glow.setColorAt(1.0, C(BG, 0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(glow)
+            p.drawRect(QRectF(0, 0, w, h))
+            # 音量越大雨越亮(与 step() 里的提速同源)
+            p.setOpacity(RAIN_ALPHA +
+                         (RAIN_ALPHA_MAX - RAIN_ALPHA) * self.rain.boost)
+            self.rain.paint(p, w, h, self.hud.mono_family)
+        finally:
+            p.end()
+
+
+# ---------------------------------------------------------------- 全局 CRT 叠层
+class CrtOverlay(QWidget):
+    """全局全息/CRT 叠层: 扫描线 + 暗角 + 噪点 + 缓慢下移的刷新亮带。
+
+    作为主窗口的直接子控件覆盖在所有面板之上(不接收鼠标事件), 因此是"全场滤镜":
+    扫描线和暗角在尺寸变化时预渲染成一张 QPixmap, 每帧只做 1 次贴图 + 噪点平铺,
+    开销极低(不要用 QGraphicsBlurEffect 之类的实时模糊, 那很慢)。
+    """
+
+    SCAN_PERIOD = 3        # 扫描线间隔(像素)
+    SCAN_ALPHA = 26        # 扫描线深度(0~255)
+    VIGNETTE = 105         # 四角压暗强度
+    BAND_ALPHA = 16        # 刷新亮带亮度
+    BAND_H = 90.0          # 刷新亮带高度
+    BAND_STEP = 0.012      # 每帧下移比例(越小越慢)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._base = None                     # 扫描线+暗角+噪点, 随尺寸重建
+        self._phase = 0.0
+
+    @staticmethod
+    def _mk_grain(n):
+        img = QImage(n, n, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor(0, 0, 0, 0))
+        for y in range(n):
+            for x in range(n):
+                img.setPixelColor(x, y, QColor(255, 255, 255, random.randint(0, 13)))
+        return QPixmap.fromImage(img)
+
+    def _build_base(self, w, h):
+        """扫描线/暗角/噪点在这张图上一次性烘焙, 每帧只贴一次图"""
+        pm = QPixmap(w, h)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setPen(Qt.NoPen)
+        p.setOpacity(0.5)
+        p.drawTiledPixmap(QRectF(0, 0, w, h), self._mk_grain(96))       # 噪点
+        p.setOpacity(1.0)
+        for y in range(0, h, self.SCAN_PERIOD):                          # 扫描线
+            p.fillRect(0, y, w, 1, C("#000000", self.SCAN_ALPHA))
+        g = QRadialGradient(QPointF(w / 2, h / 2), math.hypot(w, h) / 2)  # 暗角
+        g.setColorAt(0.0, C("#000000", 0))
+        g.setColorAt(0.60, C("#000000", 0))
+        g.setColorAt(1.0, C("#000000", self.VIGNETTE))
+        p.setBrush(g)
+        p.drawRect(QRectF(0, 0, w, h))
+        p.end()
+        self._base = pm
+
+    def paintEvent(self, _ev):
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        if self._base is None or self._base.size() != self.size():
+            self._build_base(w, h)
+        p = QPainter(self)
+        try:
+            p.drawPixmap(0, 0, self._base)
+            # 缓慢下移的刷新亮带(全场唯一每帧变化的部分)
+            self._phase = (self._phase + self.BAND_STEP) % 1.0
+            y = self._phase * (h + self.BAND_H) - self.BAND_H
+            band = QLinearGradient(0, y, 0, y + self.BAND_H)
+            band.setColorAt(0.0, C("#7fe9ff", 0))
+            band.setColorAt(0.5, C("#7fe9ff", self.BAND_ALPHA))
+            band.setColorAt(1.0, C("#7fe9ff", 0))
+            p.setPen(Qt.NoPen)
+            p.setBrush(band)
+            p.drawRect(QRectF(0, y, w, self.BAND_H))
+        finally:
+            p.end()
 
 
 # ---------------------------------------------------------------- 雷达画布
@@ -92,12 +375,12 @@ class RadarWidget(QWidget):
         cx, cy = w / 2, h / 2            # 画布非正方形时仍保持居中
         r = min(w, h) / 2 - 30
 
-        # 深空背景: 径向渐变(中心微亮)
-        p.fillRect(0, 0, w, h, C(BG))
+        # 半透明深空底: 让背后的字符雨隐约透出
+        p.fillRect(0, 0, w, h, C("#060a11", 150))
         gbg = QRadialGradient(QPointF(cx, cy), r * 1.35)
-        gbg.setColorAt(0.0, C("#0d1a2b"))
-        gbg.setColorAt(0.55, C("#0a1522"))
-        gbg.setColorAt(1.0, C(BG))
+        gbg.setColorAt(0.0, C("#0d1a2b", 165))
+        gbg.setColorAt(0.55, C("#0a1522", 130))
+        gbg.setColorAt(1.0, C(BG, 0))
         p.setBrush(gbg)
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(cx, cy), r * 1.02, r * 1.02)
@@ -262,7 +545,7 @@ class WaterfallWidget(QWidget):
     def _paint(self, p):
         p.setRenderHint(QPainter.Antialiasing, False)   # 瀑布图用硬边更清晰
         w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, C(BG))
+        p.fillRect(0, 0, w, h, C("#060a11", 170))
 
         pad_l, pad_b, pad_t, pad_r = 34, 14, 16, 12
         gw, gh = w - pad_l - pad_r, h - pad_b - pad_t
@@ -319,19 +602,25 @@ class HudWindow(QMainWindow):
         self.setWindowTitle(title)
         self.resize(1200, 860)
         self.setStyleSheet(f"""
-            QMainWindow, QWidget {{ background: {BG}; }}
-            QFrame#panel {{ background: {PANEL}; border: 1px solid {GRID};
+            QMainWindow {{ background: {BG}; }}
+            QWidget {{ background: transparent; }}
+            QFrame#panel {{ background: rgba(11, 18, 32, 178); border: 1px solid {GRID};
                             border-radius: 8px; }}
             QLabel#title {{ color: {CYAN}; }}
             QLabel#dim {{ color: {DIM}; }}
-            QTextEdit {{ background: #05080e; color: {TEXT};
+            QTextEdit {{ background: rgba(5, 8, 14, 178); color: {TEXT};
                          border: 1px solid {GRID}; border-radius: 8px;
                          font-family: "{hud.mono_family}"; font-size: 12px; }}
-            QScrollBar:vertical {{ background: {BG}; width: 10px; }}
+            QScrollBar:vertical {{ background: transparent; width: 10px; }}
             QScrollBar::handle:vertical {{ background: {GRID}; border-radius: 5px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent; }}
         """)
 
-        root = QWidget()
+        root = RainBackdrop(hud)
+        self.root = root
+        self.rain = root.rain
         self.setCentralWidget(root)
         lay = QVBoxLayout(root)
         lay.setContentsMargins(14, 12, 14, 12)
@@ -435,6 +724,16 @@ class HudWindow(QMainWindow):
             "warn": _fmt(AMBER), "diag": _fmt(DIM), "text": _fmt(TEXT),
         }
 
+        # 全局 CRT/全息叠层: 覆盖在所有面板之上(不接收鼠标)
+        self.crt = CrtOverlay(self)
+        self.crt.setGeometry(self.rect())
+        self.crt.raise_()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.crt.setGeometry(self.rect())
+        self.crt.raise_()
+
     def closeEvent(self, ev):
         if self.hud._on_close:
             try:
@@ -475,6 +774,8 @@ class SoundRadarHUD:
         self._peak_hz = 0.0
         self._lut = self._build_lut()
         self._blink = 0
+        self._rain_phase = 0
+        self._crt_phase = 0
         self._kind = "info"
         self.sweep = 0.0
         self.active = False
@@ -540,6 +841,15 @@ class SoundRadarHUD:
             self._pending_logs.clear()
         self.win.radar.update()
         self.win.wave.update()
+        # 字符雨: 每 4 帧推进一格(~15fps, 比 60fps 更像"雨滴"), 音量驱动亮度/速度
+        self._rain_phase = (self._rain_phase + 1) % 4
+        if self._rain_phase == 0:
+            self.win.rain.step(self._level)
+            self.win.root.update()
+        # CRT 叠层: 更慢(~7.5fps), 全窗合成较贵, 只需亮带缓慢下移
+        self._crt_phase = (self._crt_phase + 1) % 8
+        if self._crt_phase == 0:
+            self.win.crt.update()
         # LIVE 指示灯: 监听时缓慢呼吸, 识别时快闪
         self._blink = (self._blink + 1) % 100
         if self._kind == "recognize":
