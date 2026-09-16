@@ -7,7 +7,7 @@
 
 English: [README.en.md](README.en.md)
 
-![整体预览](ui/Screenshot%20from%202026-09-16%2016-22-15.png)
+![整体预览](ui/Screenshot%20from%202026-09-16%2016-23-28.png)
 
 *语音助手运行整体预览*
 

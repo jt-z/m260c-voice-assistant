@@ -9,7 +9,7 @@ script is launched; anything else is answered by DeepSeek and read out loud.
 
 中文文档: [README.md](README.md)
 
-![Overall preview](ui/Screenshot%20from%202026-09-16%2016-22-15.png)
+![Overall preview](ui/Screenshot%20from%202026-09-16%2016-23-28.png)
 
 *Overall preview of the voice assistant in action*
 
