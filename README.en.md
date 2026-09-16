@@ -9,9 +9,9 @@ script is launched; anything else is answered by DeepSeek and read out loud.
 
 中文文档: [README.md](README.md)
 
-![HUD](ui/hud_screenshot.png)
+![Overall preview](ui/Screenshot%20from%202026-09-09%2013-20-29.png)
 
-*Real-time HUD: circular sound-source radar (left), spectrum waterfall (center), status/log/diagnostics (right)*
+*Overall preview of the voice assistant in action*
 
 ---
 

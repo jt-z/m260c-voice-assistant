@@ -7,9 +7,9 @@
 
 English: [README.en.md](README.en.md)
 
-![HUD 界面](ui/hud_screenshot.png)
+![整体预览](ui/Screenshot%20from%202026-09-09%2013-20-29.png)
 
-*实时 HUD：环形声源雷达（左）+ 频谱瀑布图（中）+ 状态/日志/诊断面板（右）*
+*语音助手运行整体预览*
 
 ---
 
