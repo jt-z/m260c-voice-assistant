@@ -4,7 +4,7 @@
 (iFlytek XFM-DP 6-mic circular array + M2-series noise-reduction board), it closes the full loop on Linux:
 **wake word → recording → offline ASR → command execution / LLM Q&A → spoken reply**.
 
-Say *"你好宽宽, 打开图片"* and the latest image opens; say *"给我倒杯咖啡"* and the robot-arm inference
+Say *"你好宽宽, 打开图片"* and the latest image opens; say *"给我倒杯咖啡"* and the robot-arm replay
 script is launched; anything else is answered by DeepSeek and read out loud.
 
 中文文档: [README.md](README.md)
@@ -22,7 +22,7 @@ script is launched; anything else is answered by DeepSeek and read out loud.
 | **On-board wake word + DOA** | The wake word runs in the speaker firmware (currently「你好宽宽」). Wake events and the 0–360° sound-source angle are reported over serial — zero wake latency on the PC side |
 | **Always-on capture + ring pre-roll** | Recording starts at process launch and a 1.2 s ring buffer is kept, so the audio right before the wake event is prepended — **this fixes the classic "first syllable of the command is cut off" problem** |
 | **Offline ASR** | SenseVoice-Small (FunASR + ModelScope, CPU) by default; fall back to lightweight Vosk with `--asr vosk`. Rolling re-decoding produces near-real-time subtitles |
-| **Command execution** | 「打开图片」(open image) / 「关闭图片」(close image) / 「给我倒杯咖啡」(make coffee → launches robot-arm inference script; say「停止」to abort) |
+| **Command execution** | 「打开图片」(open image) / 「关闭图片」(close image) / 「给我倒杯咖啡」(make coffee → launches the robot-arm replay script in a new terminal window) |
 | **LLM fallback** | Anything that doesn't match a command goes to DeepSeek; the reply is spoken via TTS. Without an API key it runs in stub mode so the whole pipeline still works |
 | **Speech synthesis** | edge-tts → ffmpeg → paplay, cached by hash of *text + voice* (works offline afterwards), with timeout and retries |
 | **Real-time HUD** | Sci-fi style PySide6/Qt6 UI: sound-source radar, spectrum waterfall, level bar, status and diagnostics panels. Display-only — the program keeps running if you close it |
@@ -78,7 +78,7 @@ script is launched; anything else is answered by DeepSeek and read out loud.
 - **WHEELTEC M260C smart speaker**: iFlytek XFM-DP 6-mic circular array, M2-series noise-reduction board, on-board USB sound card
 - Serial chip CH9102 (`1a86:55d4`) → `/dev/ttyACM*` (the code auto-detects it by USB ID, never hard-codes the port)
 - Capture: XFM-DP (USB Audio In, 16000 Hz mono); Playback: C-Media USB sound card (48000 Hz stereo)
-- Robot-arm task (optional): a lerobot + ACT model workspace, see "Coffee task" below
+- Robot-arm task (optional): a lerobot replay workspace (recorded dataset + B601 follower arm), see "Coffee task" below
 
 ```bash
 $ ls -l /dev/ttyACM*
@@ -129,7 +129,7 @@ python voice_command_demo.py
 |---|---|
 | 你好宽宽 → 打开图片 | Opens the newest image on the Desktop (falls back to Pictures) |
 | 你好宽宽 → 关闭图片 | Closes the image opened before |
-| 你好宽宽 → 给我倒杯咖啡 | Opens a terminal window running the robot-arm inference script; say「停止」to abort |
+| 你好宽宽 → 给我倒杯咖啡 | Opens a terminal window running the robot-arm replay script (data replay); press ENTER to start, Ctrl+C to abort |
 | 你好宽宽 → anything else | Answered by DeepSeek and spoken via TTS |
 | (no match / no API key) | Speaks the fallback phrase「暂时还处理不了」 |
 
@@ -213,8 +213,8 @@ Only **source code and docs** are versioned. The following are excluded (see [.g
 - The factory wake word is「小微小微」; this repo is currently configured for「你好宽宽」. Make sure it matches your
   device (see `voice_command_demo.py: WAKE_WORD_TEXT`).
 - The **coffee task depends on an external workspace**: the default script path
-  `COFFEE_SCRIPT = /home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh` plus the lerobot/ACT checkpoint must be
-  prepared separately; use `--coffee-script` to point at your own script.
+  `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh` (B601 follower data replay; a dataset and CAN setup
+  are required) must be prepared separately; use `--coffee-script` to point at your own script.
 - **No iFlytek offline command-word / online AIUI recognition** is included (that needs an iFlytek open-platform APPID
   and resource files). Local ASR replaces it, so no iFlytek account is required.
 - The HUD needs a graphical session (`DISPLAY`/Wayland); drop `--ui` on headless machines. If Qt6 complains about a

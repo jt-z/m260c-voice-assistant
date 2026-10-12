@@ -27,7 +27,7 @@ Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形�
 |---|---|
 | 你好宽宽 → 打开图片 | 打开最新的图片文件 |
 | 你好宽宽 → 关闭图片 | 关闭之前打开的那张图 |
-| 你好宽宽 → 给我倒杯咖啡 | 新开终端窗口跑机械臂推理脚本 |
+| 你好宽宽 → 给我倒杯咖啡 | 新开终端窗口跑机械臂回放脚本 |
 | 你好宽宽 → 其它任何话 | 交给 DeepSeek 回答并播报 |
 
 ---
@@ -119,7 +119,7 @@ llm.py "你好"
 | 唤醒后录音时长 | `voice_command_demo.py: --duration` | 3s |
 | 预滚时长 | `voice_command_demo.py: PRE_ROLL_SEC` | 1.2s |
 | 识别引擎 | `voice_command_demo.py: --asr` | SenseVoice (`sv`) |
-| 咖啡脚本 | `voice_command_demo.py: COFFEE_SCRIPT` | `/home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh` |
+| 咖啡脚本 | `voice_command_demo.py: COFFEE_SCRIPT` | `/home/kf/LX/pai0/tool/b601_single/replay.sh` |
 | 兜底提示语 | `voice_command_demo.py: --fallback-say` | 暂时还处理不了 |
 | 大模型 | `llm.py: MODEL` | `deepseek-v4-flash` |
 | 大模型 key | 环境变量 `DEEPSEEK_API_KEY` 或 `.deepseek_key` 文件 | 已配置 |
@@ -137,8 +137,10 @@ llm.py "你好"
 └── ...
 
 /home/kf/LX/pai0/                     机械臂工作区
-├── run_inference_b601_make_coffee_ACT_50k.sh    咖啡推理脚本
-├── 50kact_b601/pretrained_model/                ACT 权重
-├── lerobot/src/lerobot/                         lerobot 源码
-└── logs/                                       推理日志
+├── tool/b601_single/replay.sh                 数据回放脚本（咖啡任务默认脚本）
+├── tool/replay_rerun.py                       重放时的 rerun 可视化脚本
+├── b601_data/b601_20260915_141534/            已录数据集（回放数据源）
+├── 50kact_b601/pretrained_model/              ACT 权重（回放不需要，推理用）
+├── lerobot/src/lerobot/                       lerobot 源码
+└── logs/                                      回放日志
 ```
