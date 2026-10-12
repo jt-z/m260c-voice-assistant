@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 voice_command_demo.py —— 语音命令控制：
-    说“打开图片”打开 / “关闭图片”关闭 图片；说“给我倒杯咖啡”后台拉起机械臂推理脚本
+    说“打开图片”打开 / “关闭图片”关闭 图片；说“给我倒杯咖啡”后台拉起机械臂回放脚本
 
 链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> SenseVoice 中文识别
       -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开、按路径关闭图片)
 
-咖啡任务: 说“给我倒杯咖啡”会新开一个 gnome-terminal 窗口跑推理脚本, 日志在窗口里实时可见;
-      窗口里先按回车开始, 运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断。
+咖啡任务: 说“给我倒杯咖啡”会新开一个 gnome-terminal 窗口跑回放脚本, 日志在窗口里实时可见;
+      窗口里先按回车开始回放, 运行中 Ctrl+C=中断。
 
 大模型兜底(默认开): 命令词都没匹配上时, 把原话交给 DeepSeek 回答并播报(reply 仅播报,
       不执行任何动作)。key 取 DEEPSEEK_API_KEY 环境变量或本目录 .deepseek_key 文件;
@@ -41,10 +41,10 @@ voice_command_demo.py —— 语音命令控制：
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
 
-语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」(跑机械臂推理脚本, 说「停止」可中断)
+语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」(跑机械臂回放脚本, 在窗口里 Ctrl+C 中断)
 识别: 默认 SenseVoice 一个引擎负责"界面/终端实时文本 + 最终定稿"(非流式, 用滚动重解码近似实时).
-咖啡任务: 后台线程执行(不阻塞语音); 输出实时进日志; 完成/失败/超时/被停止 均 TTS 播报;
-          执行期间只接受「停止」类指令; 脚本的 "按 ENTER" 确认会自动回车.
+咖啡任务: 后台线程只负责弹终端窗口(不阻塞语音); 脚本在新窗口里跑, 输出在窗口内实时可见;
+          本程序不干预脚本的结束(不设超时/不注入按键), 窗口关闭后方可再次发起.
 """
 import argparse
 import json
@@ -97,12 +97,12 @@ _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确�
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 LLM_ACK_TEXT = "我想想"    # 交给大模型前的等待提示(启动时预热, 尽量秒出声)
 
-# ---- 咖啡任务(机械臂推理脚本) ----
+# ---- 咖啡任务(机械臂回放脚本) ----
 # 在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里按键提前终止
-# (运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断, 与手动跑脚本时完全一致)。
+# (脚本里先按 ENTER 开始回放, 运行中 Ctrl+C 中断, 与手动跑脚本时完全一致)。
 # 本程序不干预脚本怎么结束; 窗口关闭后即可再次发起。
-COFFEE_SCRIPT = "/home/kf/LX/pai0/run_inference_b601_make_coffee_ACT_50k.sh"
-COFFEE_TERM_TITLE = "咖啡任务(ACT 推理)"
+COFFEE_SCRIPT = "/home/kf/LX/pai0/tool/b601_single/replay.sh"
+COFFEE_TERM_TITLE = "咖啡任务(数据回放)"
 _coffee = {"proc": None}                  # gnome-terminal 进程(存活=窗口还开着), 防重复启动
 _coffee_lock = threading.Lock()
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
@@ -189,7 +189,7 @@ def close_image(*_ignored):
 
 
 def make_coffee(*_ignored):
-    """语音“给我倒杯咖啡/做咖啡” -> 在新的终端窗口里跑机械臂推理脚本"""
+    """语音“给我倒杯咖啡/做咖啡” -> 在新的终端窗口里跑机械臂回放脚本"""
     with _coffee_lock:
         p = _coffee["proc"]
         if p is not None and p.poll() is None:
@@ -224,7 +224,7 @@ def _coffee_launch():
         return
     log_state(f"咖啡任务：在新终端窗口里启动 {os.path.basename(script)}", "awake")
     log("[咖啡] 提示：机械臂即将动作，请确保周边安全")
-    log("[咖啡] 窗口里：先按回车开始推理；运行中 n=提前结束并正常收尾, q=停止, Ctrl+C=中断")
+    log("[咖啡] 窗口里：先按回车开始回放；运行中 Ctrl+C 中断")
     log("[咖啡] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的结束")
     tts_speak_async("好的，开始为你制作咖啡")     # 后台播报, 不拖慢窗口启动
 
@@ -249,7 +249,7 @@ def _coffee_launch():
 
 # 命令词 -> 动作; 顺序即优先级(“关闭”类必须先于“图片”, 否则含“图”会被打开命令截走)
 COMMANDS = [
-    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 新终端窗口跑机械臂推理脚本
+    (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 新终端窗口跑机械臂回放脚本
     (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
@@ -774,7 +774,7 @@ if __name__ == "__main__":
     ap.add_argument("--no-llm", action="store_true",
                     help="关闭大模型兜底: 命令词没匹配上时不问 DeepSeek, 直接播兜底语")
     ap.add_argument("--coffee-script", default=COFFEE_SCRIPT,
-                    help="「给我倒杯咖啡」时在终端窗口里执行的机械臂推理脚本")
+                    help="「给我倒杯咖啡」时在终端窗口里执行的机械臂回放脚本")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
