@@ -108,7 +108,7 @@ LLM_ACK_TEXT = "我想想"    # 交给大模型前的等待提示(启动时预�
 # 执行过程交给脚本, 本程序只做三件事: 拉起窗口、脚本结束时按退出码播报"完成/异常"、防重复启动。
 # 所有机械臂任务共用一个槽位 _arm: 同一时刻只允许一个在跑, 两个进程抢同一台机械臂是危险的。
 COFFEE_SCRIPT = "/home/kf/LX/pai0/tool/b601_single/replay.sh"
-COFFEE_TERM_TITLE = "咖啡任务(数据回放)"
+COFFEE_TERM_TITLE = "咖啡任务"
 FRUIT_SCRIPT = "/home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh"
 FRUIT_DURATION = 120                      # 水果推理兜底超时(秒): 到点自动结束, 0=不限(脚本默认一直跑到 Ctrl+C)
 ARM_RESULT_FILE = os.path.join(PROJECT_DIR, ".arm_last_result")  # 终端包装脚本把脚本退出码写这里, 供"完成播报"
