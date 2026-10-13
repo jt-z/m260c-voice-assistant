@@ -141,6 +141,7 @@ python voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默�
 python voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
 python voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
 python voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
+python voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
 
 # —— 硬件与协议（无需讯飞账号）——
 python voice_interact_test.py                     # 唤醒→录音→回放 循环测试
@@ -209,7 +210,8 @@ python llm.py "你好"
 - **唤醒词在音箱固件里**，改唤醒词走串口命令（`voice_interact_test.py --set-wakeword "..."`），**改完需拔插音箱**才生效。
 - 目标板内唤醒词出厂为「小微小微」，本仓库当前配置为「你好宽宽」，用前请与设备实际值对齐（见 `voice_command_demo.py: WAKE_WORD_TEXT`）。
 - **咖啡任务依赖外部工作区**：默认脚本路径 `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh`（B601 从臂数据回放，需自备数据集与 CAN 环境）需自行准备，用 `--coffee-script` 可替换。
-- **水果抓取任务依赖外部工作区**：默认脚本路径 `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh`（SO-101 单臂 ACT 抓取，按水果传参 `banana`/`peach`，需自备权重）需自行准备，用 `--fruit-script` 可替换。
+- **水果抓取任务依赖外部工作区**：默认脚本路径 `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh`（SO-101 单臂 ACT 抓取，按水果传参 `banana`/`peach`，需自备权重）需自行准备，用 `--fruit-script` 可替换；水果推理默认带 **120 秒兜底超时**（`--fruit-duration`，0=不限），避免无限推理。
+- **机械臂任务只是"半闭环"**：脚本结束时按退出码播报「完成/异常」，但**不判断是否真的夹到**（无视觉/夹爪检测）。详见 `notes/05-命令与咖啡任务.md` 第 6 节。
 - **不含讯飞离线命令词 / 在线 AIUI 识别**（那需要讯飞开放平台 APPID 与资源文件）；本项目用本地 ASR 替代，因此无需讯飞账号即可跑通。
 - HUD 需要图形环境（`DISPLAY`/Wayland）；无界面环境请去掉 `--ui`。Qt6 若报缺 `libxcb-cursor.so.0`，安装对应系统包即可。
 - 首次运行会下载 SenseVoice 权重（约 936MB），加载约 5~6s；之后每条识别 0.1~0.25s。

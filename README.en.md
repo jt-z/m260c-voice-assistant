@@ -145,6 +145,7 @@ python voice_command_demo.py --duration 5         # record 5s after wake (defaul
 python voice_command_demo.py --wav a.wav          # recognize an existing WAV (no hardware)
 python voice_command_demo.py --coffee-script /path/x.sh   # use another coffee-task script
 python voice_command_demo.py --fruit-script /path/x.sh    # use another fruit-grasp script
+python voice_command_demo.py --fruit-duration 0           # fruit-inference timeout in seconds, 0 = unlimited (default 120)
 
 # —— hardware / protocol (no iFlytek account needed) ——
 python voice_interact_test.py                     # wake → record → playback loop
@@ -220,7 +221,10 @@ Only **source code and docs** are versioned. The following are excluded (see [.g
 - The **fruit-grasp task depends on an external workspace**: the default script path
   `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh` (SO-101 single-arm ACT grasp; takes the
   fruit as an argument: `banana` / `peach`; checkpoints required) must be prepared separately; use `--fruit-script`
-  to point at your own script.
+  to point at your own script. Fruit inference has a **120 s fallback timeout** by default (`--fruit-duration`, 0 = unlimited).
+- **Robot-arm tasks are only "half-closed-loop"**: the program speaks "done / error" based on the script's exit code,
+  but does **not** verify whether the grasp actually succeeded (no vision / gripper check). See section 6 of
+  `notes/05-命令与咖啡任务.md`.
 - **No iFlytek offline command-word / online AIUI recognition** is included (that needs an iFlytek open-platform APPID
   and resource files). Local ASR replaces it, so no iFlytek account is required.
 - The HUD needs a graphical session (`DISPLAY`/Wayland); drop `--ui` on headless machines. If Qt6 complains about a

@@ -40,6 +40,7 @@ voice_command_demo.py —— 语音命令控制：
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
     <lerobot-python> voice_command_demo.py --fruit-script /path/xxx.sh    # 换水果抓取脚本
+    <lerobot-python> voice_command_demo.py --fruit-duration 0             # 水果推理设为不限时长(默认 120s 兜底)
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
@@ -47,7 +48,8 @@ voice_command_demo.py —— 语音命令控制：
 语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」/「夹香蕉」「夹桃子」(跑机械臂脚本, 窗口里 Ctrl+C 中断)
 识别: 默认 SenseVoice 一个引擎负责"界面/终端实时文本 + 最终定稿"(非流式, 用滚动重解码近似实时).
 机械臂任务: 后台线程只负责弹终端窗口(不阻塞语音); 脚本在新窗口里跑, 输出在窗口内实时可见;
-          本程序不干预脚本的结束(不设超时/不注入按键), 窗口关闭后方可再次发起.
+          本程序不干预脚本的执行(不注入按键), 但脚本结束时按退出码播报"完成/异常";
+          水果推理默认带 120s 兜底超时(见 --fruit-duration, 0=不限), 窗口关闭后方可再次发起.
 """
 import argparse
 import json
@@ -103,11 +105,13 @@ LLM_ACK_TEXT = "我想想"    # 交给大模型前的等待提示(启动时预�
 # ---- 机械臂任务(咖啡回放 / 水果抓取) ----
 # 都是在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里提前终止
 # (脚本里先按 ENTER 开始, 运行中 Ctrl+C 中断, 与手动跑脚本时完全一致)。
-# 本程序不干预脚本怎么结束; 窗口关闭后即可再次发起。
+# 执行过程交给脚本, 本程序只做三件事: 拉起窗口、脚本结束时按退出码播报"完成/异常"、防重复启动。
 # 所有机械臂任务共用一个槽位 _arm: 同一时刻只允许一个在跑, 两个进程抢同一台机械臂是危险的。
 COFFEE_SCRIPT = "/home/kf/LX/pai0/tool/b601_single/replay.sh"
 COFFEE_TERM_TITLE = "咖啡任务(数据回放)"
 FRUIT_SCRIPT = "/home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh"
+FRUIT_DURATION = 120                      # 水果推理兜底超时(秒): 到点自动结束, 0=不限(脚本默认一直跑到 Ctrl+C)
+ARM_RESULT_FILE = os.path.join(PROJECT_DIR, ".arm_last_result")  # 终端包装脚本把脚本退出码写这里, 供"完成播报"
 _arm = {"proc": None, "title": ""}        # 当前终端任务进程(存活=窗口还开着), 防重复启动
 _arm_lock = threading.Lock()
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
@@ -217,13 +221,18 @@ def pick_fruit(text: str = ""):
         tts_speak("请问要夹香蕉还是桃子")
         return
     label = FRUIT_LABEL[fruit]
+    # 水果脚本本身不带时长, 底层 act_inference_101.sh 默认会一直推理到 Ctrl+C;
+    # 这里用 DURATION 环境变量给它一个兜底超时(0 = 不限)。
+    env = {"DURATION": str(FRUIT_DURATION)} if FRUIT_DURATION else None
     _start_arm_task(
         name="水果", argv=[FRUIT_SCRIPT, fruit], title=f"水果任务({label})",
         start_speak=f"好的，开始为你夹{label}",
-        start_hints=[f"水果：{label}（{fruit}）；窗口里先按回车开始推理，运行中 Ctrl+C 中断"])
+        start_hints=[f"水果：{label}（{fruit}）；窗口里先按回车开始推理，运行中 Ctrl+C 中断",
+                     f"兜底超时：{FRUIT_DURATION} 秒（到点自动结束）" if FRUIT_DURATION else "运行时长：不限"],
+        env=env)
 
 
-def _start_arm_task(name, argv, title, start_speak, start_hints):
+def _start_arm_task(name, argv, title, start_speak, start_hints, env=None):
     """机械臂任务共用入口(咖啡/水果): 同一时刻只允许一个, 已有在跑则忽略本次。"""
     with _arm_lock:
         p = _arm["proc"]
@@ -232,18 +241,42 @@ def _start_arm_task(name, argv, title, start_speak, start_hints):
             tts_speak_async("已有机械臂任务在运行，请先关掉那个窗口")
             return
     threading.Thread(target=_arm_launch, daemon=True, name="arm-task",
-                     args=(name, list(argv), title, start_speak, start_hints)).start()
+                     args=(name, list(argv), title, start_speak, start_hints, env)).start()
 
 
-def _arm_term_cmd(argv, name):
-    """终端里要执行的 shell 命令: 跑脚本 -> 报告退出码 -> 停在提示上等回车关窗"""
+def _arm_term_cmd(argv, name, env=None):
+    """终端里要执行的 shell 命令: (可选环境变量) 跑脚本 -> 退出码写进结果文件 -> 报告并等回车关窗"""
+    pre = "".join(shlex.quote(f"{k}={v}") + " " for k, v in (env or {}).items())
     cmd = " ".join(shlex.quote(a) for a in argv)
-    return ("bash {c}; rc=$?; echo; "
+    note = f"printf '%s' \"$rc\" > {shlex.quote(ARM_RESULT_FILE)}; "
+    return ("{pre}bash {cmd}; rc=$?; {note}echo; "
             "echo \"[{n}] 脚本已结束，退出码 $rc\"; "
-            "read -r -p \"[{n}] 按回车关闭本窗口 \" _").format(c=cmd, n=name)
+            "read -r -p \"[{n}] 按回车关闭本窗口 \" _").format(pre=pre, cmd=cmd, note=note, n=name)
 
 
-def _arm_launch(name, argv, title, start_speak, start_hints):
+def _read_arm_result():
+    """读终端包装脚本写下的脚本退出码: True=正常结束(0/130), False=异常, None=没拿到(窗口被直接关掉)"""
+    try:
+        with open(ARM_RESULT_FILE, encoding="utf-8") as fp:
+            rc = int(fp.read().strip())
+    except (OSError, ValueError):
+        return None
+    return rc in (0, 130)          # 130 = Ctrl+C 主动中断, 脚本内部按"正常收尾"处理
+
+
+def _announce_arm_result(name):
+    """脚本结束后按退出码播报一次(不影响脚本本身)"""
+    ok = _read_arm_result()
+    if ok is None:
+        log(f"[{name}] 未拿到脚本退出码（窗口可能被直接关闭, 无法判断结果）")
+        tts_speak_async(f"{name}任务窗口已关闭")
+    elif ok:
+        tts_speak_async(f"{name}任务已完成")
+    else:
+        tts_speak_async(f"{name}任务异常结束，请查看窗口")
+
+
+def _arm_launch(name, argv, title, start_speak, start_hints, env=None):
     """把脚本放进一个新终端窗口跑: 日志实时可见, 窗口里可直接按键提前终止"""
     script = argv[0]
     if not os.path.exists(script):
@@ -263,13 +296,18 @@ def _arm_launch(name, argv, title, start_speak, start_hints):
     log(f"[{name}] 提示：机械臂即将动作，请确保周边安全")
     for h in start_hints:
         log(f"[{name}] {h}")
-    log(f"[{name}] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的结束")
+    log(f"[{name}] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的执行")
     tts_speak_async(start_speak)          # 后台播报, 不拖慢窗口启动
+
+    try:
+        os.remove(ARM_RESULT_FILE)        # 清掉上一次的结果, 否则会把旧结果误判成本次
+    except OSError:
+        pass
 
     try:
         proc = subprocess.Popen(
             [term, "--title=%s" % title, "--wait",
-             "--", "bash", "-c", _arm_term_cmd(argv, name)],
+             "--", "bash", "-c", _arm_term_cmd(argv, name, env)],
             cwd=os.path.dirname(script), start_new_session=True)
     except Exception as e:
         log(f"[{name}] 启动失败: {type(e).__name__}: {e}")
@@ -280,7 +318,16 @@ def _arm_launch(name, argv, title, start_speak, start_hints):
         _arm["proc"] = proc
         _arm["title"] = title
     log(f"[{name}] 终端已打开（gnome-terminal PID={proc.pid}）")
+    # 脚本一结束(结果文件出现)就播报, 不必等用户按回车关窗口
+    announced = False
+    while proc.poll() is None:
+        if not announced and os.path.exists(ARM_RESULT_FILE):
+            announced = True
+            _announce_arm_result(name)
+        time.sleep(0.5)
     rc = proc.wait()
+    if not announced:
+        _announce_arm_result(name)
     with _arm_lock:
         _arm["proc"] = None
         _arm["title"] = ""
@@ -833,12 +880,15 @@ if __name__ == "__main__":
                     help="「给我倒杯咖啡」时在终端窗口里执行的机械臂回放脚本")
     ap.add_argument("--fruit-script", default=FRUIT_SCRIPT,
                     help="「夹香蕉/夹桃子」时在终端窗口里执行的机械臂推理脚本(按水果传参 banana/peach)")
+    ap.add_argument("--fruit-duration", type=int, default=FRUIT_DURATION,
+                    help="水果抓取推理的兜底超时秒数(0=不限): 防止 ACT 一直推理到 Ctrl+C(默认 %(default)s)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
     a.llm = not a.no_llm               # 默认开启: 未命中命令词时交给 DeepSeek 问答
     COFFEE_SCRIPT = a.coffee_script
     FRUIT_SCRIPT = a.fruit_script
+    FRUIT_DURATION = a.fruit_duration
 
     if a.log_file:
         _log_fp = open(a.log_file, "a", encoding="utf-8")
