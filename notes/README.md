@@ -91,6 +91,7 @@ voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
 voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
 voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
 voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
+voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
 
 # —— 硬件与协议 ——
 voice_interact_test.py --version           # 查降噪板固件版本
