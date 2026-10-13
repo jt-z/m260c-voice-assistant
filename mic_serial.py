@@ -204,7 +204,9 @@ class MicSerial:
                 break
             chunk = os.read(self._fd, 4096)
             if not chunk:
-                break
+                # select 报"可读"但读回空 = EOF: 设备已被拔出/重新枚举(fd 指向已删除的节点),
+                # 必须显式报错, 否则上层会一直空转、永不重连(唤醒事件全部丢失)。
+                raise SerialTimeoutError("串口设备已断开(读返回空): %s" % self.port)
             out += chunk
         return out
 
@@ -263,10 +265,13 @@ class MicSerial:
                 continue
             try:
                 got = False
-                for _type, _sid, payload in m.read_frames(timeout=timeout):
-                    if _type == MSG_SHAKE and payload == HANDSHAKE_PAYLOAD:
-                        got = True
-                        break
+                try:
+                    for _type, _sid, payload in m.read_frames(timeout=timeout):
+                        if _type == MSG_SHAKE and payload == HANDSHAKE_PAYLOAD:
+                            got = True
+                            break
+                except SerialTimeoutError:      # 探测途中设备断开: 当作无响应, 换下一个端口
+                    got = False
                 if got:
                     print(f"[检测] 端口 {port} 检测到降噪板握手帧")
                     return port, m
