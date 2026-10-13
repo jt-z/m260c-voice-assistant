@@ -20,7 +20,7 @@ English: [README.en.md](README.en.md)
 | **板内唤醒 + 声源定位** | 唤醒词跑在音箱固件里（当前「你好宽宽」），唤醒事件与 0~360° 声源角度经串口上报，PC 侧零延迟响应 |
 | **常开录音 + 环形预滚** | 进程启动即持续录音、维护最近 1.2s 环形缓冲，唤醒瞬间回溯预滚音频，**解决命令第一个字被切掉**的老问题 |
 | **离线语音识别** | 默认 SenseVoice-Small（FunASR + ModelScope，CPU 推理），可 `--asr vosk` 回退到轻量 Vosk；配合滚动重解码给出近似实时的字幕 |
-| **命令词执行** | 「打开图片」「关闭图片」「给我倒杯咖啡」（后台拉起机械臂回放脚本，在新终端窗口里跑） |
+| **命令词执行** | 「打开图片」「关闭图片」「给我倒杯咖啡」「夹香蕉 / 夹桃子」（后台拉起机械臂脚本，在新终端窗口里跑） |
 | **大模型兜底** | 命令词没匹配上的话交给 DeepSeek 问答，回复经 TTS 播报；未配 key 时自动进入桩模式，链路照样能跑通 |
 | **语音播报** | edge-tts → ffmpeg → paplay 三级链路，按「文本 + 音色」哈希缓存，离线也能播；合成带超时重试 |
 | **实时 HUD 界面** | PySide6/Qt6 绘制的科幻风界面：声源雷达、频谱瀑布图、电平条、状态与诊断面板，纯展示不参与控制（关掉界面程序照常跑） |
@@ -126,6 +126,7 @@ python voice_command_demo.py
 | 你好宽宽 → 打开图片 | 打开桌面（回退到图片文件夹）里最新的图片 |
 | 你好宽宽 → 关闭图片 | 关闭刚才打开的那张图 |
 | 你好宽宽 → 给我倒杯咖啡 | 新开终端窗口跑机械臂回放脚本（数据回放）；窗口里按回车开始、Ctrl+C 中断 |
+| 你好宽宽 → 夹香蕉 / 夹桃子 | 按话里的水果新开终端窗口跑抓取推理脚本（banana / peach）；窗口里按回车开始、Ctrl+C 中断 |
 | 你好宽宽 → 其它任何话 | 交给 DeepSeek 回答并语音播报 |
 | （识别失败 / 无 key） | 播报兜底语「暂时还处理不了」 |
 
@@ -139,6 +140,7 @@ python voice_command_demo.py --no-llm             # 关闭大模型兜底
 python voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
 python voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
 python voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
+python voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
 
 # —— 硬件与协议（无需讯飞账号）——
 python voice_interact_test.py                     # 唤醒→录音→回放 循环测试
@@ -207,6 +209,7 @@ python llm.py "你好"
 - **唤醒词在音箱固件里**，改唤醒词走串口命令（`voice_interact_test.py --set-wakeword "..."`），**改完需拔插音箱**才生效。
 - 目标板内唤醒词出厂为「小微小微」，本仓库当前配置为「你好宽宽」，用前请与设备实际值对齐（见 `voice_command_demo.py: WAKE_WORD_TEXT`）。
 - **咖啡任务依赖外部工作区**：默认脚本路径 `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh`（B601 从臂数据回放，需自备数据集与 CAN 环境）需自行准备，用 `--coffee-script` 可替换。
+- **水果抓取任务依赖外部工作区**：默认脚本路径 `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh`（SO-101 单臂 ACT 抓取，按水果传参 `banana`/`peach`，需自备权重）需自行准备，用 `--fruit-script` 可替换。
 - **不含讯飞离线命令词 / 在线 AIUI 识别**（那需要讯飞开放平台 APPID 与资源文件）；本项目用本地 ASR 替代，因此无需讯飞账号即可跑通。
 - HUD 需要图形环境（`DISPLAY`/Wayland）；无界面环境请去掉 `--ui`。Qt6 若报缺 `libxcb-cursor.so.0`，安装对应系统包即可。
 - 首次运行会下载 SenseVoice 权重（约 936MB），加载约 5~6s；之后每条识别 0.1~0.25s。

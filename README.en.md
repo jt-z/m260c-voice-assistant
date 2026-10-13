@@ -22,7 +22,7 @@ script is launched; anything else is answered by DeepSeek and read out loud.
 | **On-board wake word + DOA** | The wake word runs in the speaker firmware (currently「你好宽宽」). Wake events and the 0–360° sound-source angle are reported over serial — zero wake latency on the PC side |
 | **Always-on capture + ring pre-roll** | Recording starts at process launch and a 1.2 s ring buffer is kept, so the audio right before the wake event is prepended — **this fixes the classic "first syllable of the command is cut off" problem** |
 | **Offline ASR** | SenseVoice-Small (FunASR + ModelScope, CPU) by default; fall back to lightweight Vosk with `--asr vosk`. Rolling re-decoding produces near-real-time subtitles |
-| **Command execution** | 「打开图片」(open image) / 「关闭图片」(close image) / 「给我倒杯咖啡」(make coffee → launches the robot-arm replay script in a new terminal window) |
+| **Command execution** | 「打开图片」(open image) / 「关闭图片」(close image) / 「给我倒杯咖啡」(make coffee → launches the robot-arm replay script in a new terminal window) / 「夹香蕉」「夹桃子」(pick banana / peach → launches the grasp-inference script) |
 | **LLM fallback** | Anything that doesn't match a command goes to DeepSeek; the reply is spoken via TTS. Without an API key it runs in stub mode so the whole pipeline still works |
 | **Speech synthesis** | edge-tts → ffmpeg → paplay, cached by hash of *text + voice* (works offline afterwards), with timeout and retries |
 | **Real-time HUD** | Sci-fi style PySide6/Qt6 UI: sound-source radar, spectrum waterfall, level bar, status and diagnostics panels. Display-only — the program keeps running if you close it |
@@ -130,6 +130,7 @@ python voice_command_demo.py
 | 你好宽宽 → 打开图片 | Opens the newest image on the Desktop (falls back to Pictures) |
 | 你好宽宽 → 关闭图片 | Closes the image opened before |
 | 你好宽宽 → 给我倒杯咖啡 | Opens a terminal window running the robot-arm replay script (data replay); press ENTER to start, Ctrl+C to abort |
+| 你好宽宽 → 夹香蕉 / 夹桃子 | Opens a terminal window running the grasp-inference script for the fruit named (banana / peach); press ENTER to start, Ctrl+C to abort |
 | 你好宽宽 → anything else | Answered by DeepSeek and spoken via TTS |
 | (no match / no API key) | Speaks the fallback phrase「暂时还处理不了」 |
 
@@ -143,6 +144,7 @@ python voice_command_demo.py --no-llm             # disable the LLM fallback
 python voice_command_demo.py --duration 5         # record 5s after wake (default 3)
 python voice_command_demo.py --wav a.wav          # recognize an existing WAV (no hardware)
 python voice_command_demo.py --coffee-script /path/x.sh   # use another coffee-task script
+python voice_command_demo.py --fruit-script /path/x.sh    # use another fruit-grasp script
 
 # —— hardware / protocol (no iFlytek account needed) ——
 python voice_interact_test.py                     # wake → record → playback loop
@@ -215,6 +217,10 @@ Only **source code and docs** are versioned. The following are excluded (see [.g
 - The **coffee task depends on an external workspace**: the default script path
   `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh` (B601 follower data replay; a dataset and CAN setup
   are required) must be prepared separately; use `--coffee-script` to point at your own script.
+- The **fruit-grasp task depends on an external workspace**: the default script path
+  `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh` (SO-101 single-arm ACT grasp; takes the
+  fruit as an argument: `banana` / `peach`; checkpoints required) must be prepared separately; use `--fruit-script`
+  to point at your own script.
 - **No iFlytek offline command-word / online AIUI recognition** is included (that needs an iFlytek open-platform APPID
   and resource files). Local ASR replaces it, so no iFlytek account is required.
 - The HUD needs a graphical session (`DISPLAY`/Wayland); drop `--ui` on headless machines. If Qt6 complains about a

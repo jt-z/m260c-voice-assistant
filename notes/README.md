@@ -28,6 +28,7 @@ Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形�
 | 你好宽宽 → 打开图片 | 打开最新的图片文件 |
 | 你好宽宽 → 关闭图片 | 关闭之前打开的那张图 |
 | 你好宽宽 → 给我倒杯咖啡 | 新开终端窗口跑机械臂回放脚本 |
+| 你好宽宽 → 夹香蕉 / 夹桃子 | 按水果新开终端窗口跑抓取推理脚本 |
 | 你好宽宽 → 其它任何话 | 交给 DeepSeek 回答并播报 |
 
 ---
@@ -89,6 +90,7 @@ voice_command_demo.py --asr vosk           # 退回 Vosk 识别
 voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
 voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
 voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
+voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
 
 # —— 硬件与协议 ——
 voice_interact_test.py --version           # 查降噪板固件版本
@@ -138,6 +140,7 @@ llm.py "你好"
 
 /home/kf/LX/pai0/                     机械臂工作区
 ├── tool/b601_single/replay.sh                 数据回放脚本（咖啡任务默认脚本）
+├── tool/101_single/fruit_inference_101.sh     水果抓取脚本（夹香蕉 / 夹桃子）
 ├── tool/replay_rerun.py                       重放时的 rerun 可视化脚本
 ├── b601_data/b601_20260915_141534/            已录数据集（回放数据源）
 ├── 50kact_b601/pretrained_model/              ACT 权重（回放不需要，推理用）
