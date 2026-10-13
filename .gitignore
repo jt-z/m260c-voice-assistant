@@ -4,3 +4,5 @@ __*
 audio
 models
 .deepseek_key
+.arm_last_result
+run.log
