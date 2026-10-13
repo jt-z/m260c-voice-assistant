@@ -547,6 +547,18 @@ def _rms_norm(chunk: bytes) -> float:
 
 
 # ---------------------------------------------------------------- 主流程
+def _serial_port_alive(mic) -> bool:
+    """当前打开的串口是否仍指向那块降噪板。
+
+    USB 复合设备在拔插/重新枚举后会换 /dev/ttyACMN 编号, 进程手里的 fd 就变成
+    "已删除"节点 —— 从此收不到任何唤醒事件。这里每轮读之前确认端口仍在,
+    且仍对应 CH9102(1a86:55d4); 失效则由 serial_reader 重连(重连会自动找到新端口)。
+    """
+    if not mic.is_open or not os.path.exists(mic.port):
+        return False
+    return MicSerial.detect_by_usb() == mic.port
+
+
 def serial_reader(args):
     """独立线程: 持续读串口 -> ACK 握手 -> 解析唤醒事件入队; 掉线自动重连.
     这样录音/识别期间也不会漏掉唤醒事件, 也不会停止握手确认造成链路"盲区"."""
@@ -575,6 +587,9 @@ def serial_reader(args):
                 time.sleep(3)           # 绝不能让读取线程静默退出
                 continue
         try:
+            if not _serial_port_alive(mic):      # 端口失效(拔插/重新枚举) -> 重连, 绝不死等
+                raise SerialTimeoutError(
+                    "串口设备已失效(端口 %s 被删除或重新枚举)" % mic.port)
             for typ, sid, payload in mic.read_frames(timeout=0.3):
                 if typ == MSG_SHAKE:
                     _stats["shake"] += 1
