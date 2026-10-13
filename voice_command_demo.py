@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 voice_command_demo.py —— 语音命令控制：
-    说“打开图片”打开 / “关闭图片”关闭 图片；说“给我倒杯咖啡”后台拉起机械臂回放脚本
+    说“打开图片”打开 / “关闭图片”关闭 图片；说“给我倒杯咖啡”后台拉起机械臂回放脚本；
+    说“夹香蕉/夹桃子”按水果拉起机械臂抓取推理脚本
 
 链路: M260C 音箱唤醒(板内唤醒引擎) -> XFM 麦克风录音(边录边识别) -> SenseVoice 中文识别
       -> 匹配命令词 -> 执行对应 Python 函数(此例用 xdg-open 打开、按路径关闭图片)
 
-咖啡任务: 说“给我倒杯咖啡”会新开一个 gnome-terminal 窗口跑回放脚本, 日志在窗口里实时可见;
-      窗口里先按回车开始回放, 运行中 Ctrl+C=中断。
+机械臂任务: 说“给我倒杯咖啡”/“夹香蕉”/“夹桃子”会新开一个 gnome-terminal 窗口跑对应脚本,
+      日志在窗口里实时可见; 窗口里先按回车开始, 运行中 Ctrl+C=中断。同一时刻只允许一个机械臂任务
+      (两个进程抢同一台机械臂危险), 已有在跑时会提示并忽略本次。
 
 大模型兜底(默认开): 命令词都没匹配上时, 把原话交给 DeepSeek 回答并播报(reply 仅播报,
       不执行任何动作)。key 取 DEEPSEEK_API_KEY 环境变量或本目录 .deepseek_key 文件;
@@ -37,13 +39,14 @@ voice_command_demo.py —— 语音命令控制：
     <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
     <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
     <lerobot-python> voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
+    <lerobot-python> voice_command_demo.py --fruit-script /path/xxx.sh    # 换水果抓取脚本
     <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
 
-语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」(跑机械臂回放脚本, 在窗口里 Ctrl+C 中断)
+语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」/「夹香蕉」「夹桃子」(跑机械臂脚本, 窗口里 Ctrl+C 中断)
 识别: 默认 SenseVoice 一个引擎负责"界面/终端实时文本 + 最终定稿"(非流式, 用滚动重解码近似实时).
-咖啡任务: 后台线程只负责弹终端窗口(不阻塞语音); 脚本在新窗口里跑, 输出在窗口内实时可见;
+机械臂任务: 后台线程只负责弹终端窗口(不阻塞语音); 脚本在新窗口里跑, 输出在窗口内实时可见;
           本程序不干预脚本的结束(不设超时/不注入按键), 窗口关闭后方可再次发起.
 """
 import argparse
@@ -97,14 +100,16 @@ _busy = threading.Event()  # 正在录音/识别/执行, 期间新唤醒明确�
 _tts_speak = None         # 懒加载的 TTS 播报函数(tts.speak)
 LLM_ACK_TEXT = "我想想"    # 交给大模型前的等待提示(启动时预热, 尽量秒出声)
 
-# ---- 咖啡任务(机械臂回放脚本) ----
-# 在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里按键提前终止
-# (脚本里先按 ENTER 开始回放, 运行中 Ctrl+C 中断, 与手动跑脚本时完全一致)。
+# ---- 机械臂任务(咖啡回放 / 水果抓取) ----
+# 都是在一个新的 gnome-terminal 窗口里跑脚本: 日志直接在窗口里实时可见, 也能在窗口里提前终止
+# (脚本里先按 ENTER 开始, 运行中 Ctrl+C 中断, 与手动跑脚本时完全一致)。
 # 本程序不干预脚本怎么结束; 窗口关闭后即可再次发起。
+# 所有机械臂任务共用一个槽位 _arm: 同一时刻只允许一个在跑, 两个进程抢同一台机械臂是危险的。
 COFFEE_SCRIPT = "/home/kf/LX/pai0/tool/b601_single/replay.sh"
 COFFEE_TERM_TITLE = "咖啡任务(数据回放)"
-_coffee = {"proc": None}                  # gnome-terminal 进程(存活=窗口还开着), 防重复启动
-_coffee_lock = threading.Lock()
+FRUIT_SCRIPT = "/home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh"
+_arm = {"proc": None, "title": ""}        # 当前终端任务进程(存活=窗口还开着), 防重复启动
+_arm_lock = threading.Lock()
 _stats = {"shake": 0, "events": 0, "wakes": 0, "wake_busy": 0, "wake_dup": 0, "other": 0}
 
 
@@ -190,66 +195,102 @@ def close_image(*_ignored):
 
 def make_coffee(*_ignored):
     """语音“给我倒杯咖啡/做咖啡” -> 在新的终端窗口里跑机械臂回放脚本"""
-    with _coffee_lock:
-        p = _coffee["proc"]
+    _start_arm_task(
+        name="咖啡", argv=[COFFEE_SCRIPT], title=COFFEE_TERM_TITLE,
+        start_speak="好的，开始为你制作咖啡",
+        start_hints=["窗口里：先按回车开始回放；运行中 Ctrl+C 中断"])
+
+
+# 水果 -> fruit_inference_101.sh 的第一个参数(脚本本身也认这些中文/英文别名)
+FRUIT_WORDS = (
+    ("banana", ("香蕉", "蕉", "banana")),
+    ("peach", ("桃子", "桃", "peach")),
+)
+FRUIT_LABEL = {"banana": "香蕉", "peach": "桃子"}
+
+
+def pick_fruit(text: str = ""):
+    """语音“夹香蕉/抓桃子/夹水果” -> 按话里提到的水果, 新终端窗口跑 fruit_inference_101.sh <fruit>"""
+    fruit = next((name for name, words in FRUIT_WORDS if any(w in text for w in words)), None)
+    if fruit is None:                         # 只说了“夹水果”但没说清哪种
+        log_state("没听清要夹哪种水果(香蕉/桃子)", "warn")
+        tts_speak("请问要夹香蕉还是桃子")
+        return
+    label = FRUIT_LABEL[fruit]
+    _start_arm_task(
+        name="水果", argv=[FRUIT_SCRIPT, fruit], title=f"水果任务({label})",
+        start_speak=f"好的，开始为你夹{label}",
+        start_hints=[f"水果：{label}（{fruit}）；窗口里先按回车开始推理，运行中 Ctrl+C 中断"])
+
+
+def _start_arm_task(name, argv, title, start_speak, start_hints):
+    """机械臂任务共用入口(咖啡/水果): 同一时刻只允许一个, 已有在跑则忽略本次。"""
+    with _arm_lock:
+        p = _arm["proc"]
         if p is not None and p.poll() is None:
-            log_state("咖啡终端窗口还开着，忽略本次指令（先关掉那个窗口再发起）", "warn")
-            tts_speak_async("正在制作中，请稍候")
+            log_state(f"{_arm['title']}还开着，忽略本次指令（先关掉那个窗口再发起）", "warn")
+            tts_speak_async("已有机械臂任务在运行，请先关掉那个窗口")
             return
-    threading.Thread(target=_coffee_launch, daemon=True, name="coffee").start()
+    threading.Thread(target=_arm_launch, daemon=True, name="arm-task",
+                     args=(name, list(argv), title, start_speak, start_hints)).start()
 
 
-def _coffee_term_cmd(script: str) -> str:
+def _arm_term_cmd(argv, name):
     """终端里要执行的 shell 命令: 跑脚本 -> 报告退出码 -> 停在提示上等回车关窗"""
-    return ("bash {s}; rc=$?; echo; "
-            "echo \"[咖啡] 脚本已结束，退出码 $rc\"; "
-            "read -r -p \"[咖啡] 按回车关闭本窗口 \" _").format(s=shlex.quote(script))
+    cmd = " ".join(shlex.quote(a) for a in argv)
+    return ("bash {c}; rc=$?; echo; "
+            "echo \"[{n}] 脚本已结束，退出码 $rc\"; "
+            "read -r -p \"[{n}] 按回车关闭本窗口 \" _").format(c=cmd, n=name)
 
 
-def _coffee_launch():
+def _arm_launch(name, argv, title, start_speak, start_hints):
     """把脚本放进一个新终端窗口跑: 日志实时可见, 窗口里可直接按键提前终止"""
-    script = COFFEE_SCRIPT
+    script = argv[0]
     if not os.path.exists(script):
-        log(f"[咖啡] 脚本不存在: {script}")
-        tts_speak("找不到咖啡脚本")
+        log(f"[{name}] 脚本不存在: {script}")
+        tts_speak("找不到任务脚本")
         return
     term = shutil.which("gnome-terminal")
     if not term:
-        log("[咖啡] 未找到 gnome-terminal, 无法在终端窗口里显示")
+        log(f"[{name}] 未找到 gnome-terminal, 无法在终端窗口里显示")
         tts_speak("找不到终端程序")
         return
     if not ensure_x_display():            # 弹终端窗口需要能连上 X(DISPLAY/XAUTHORITY)
-        log("[咖啡] 当前环境无法打开终端窗口, 咖啡任务未启动")
+        log(f"[{name}] 当前环境无法打开终端窗口, 任务未启动")
         tts_speak("无法打开终端窗口")
         return
-    log_state(f"咖啡任务：在新终端窗口里启动 {os.path.basename(script)}", "awake")
-    log("[咖啡] 提示：机械臂即将动作，请确保周边安全")
-    log("[咖啡] 窗口里：先按回车开始回放；运行中 Ctrl+C 中断")
-    log("[咖啡] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的结束")
-    tts_speak_async("好的，开始为你制作咖啡")     # 后台播报, 不拖慢窗口启动
+    log_state(f"{title}：在新终端窗口里启动 {os.path.basename(script)}", "awake")
+    log(f"[{name}] 提示：机械臂即将动作，请确保周边安全")
+    for h in start_hints:
+        log(f"[{name}] {h}")
+    log(f"[{name}] 脚本结束后窗口停在提示上, 按回车关闭; 本程序不会去动脚本的结束")
+    tts_speak_async(start_speak)          # 后台播报, 不拖慢窗口启动
 
     try:
         proc = subprocess.Popen(
-            [term, "--title=%s" % COFFEE_TERM_TITLE, "--wait",
-             "--", "bash", "-c", _coffee_term_cmd(script)],
+            [term, "--title=%s" % title, "--wait",
+             "--", "bash", "-c", _arm_term_cmd(argv, name)],
             cwd=os.path.dirname(script), start_new_session=True)
     except Exception as e:
-        log(f"[咖啡] 启动失败: {type(e).__name__}: {e}")
-        tts_speak("咖啡任务启动失败")
+        log(f"[{name}] 启动失败: {type(e).__name__}: {e}")
+        tts_speak("任务启动失败")
         return
 
-    with _coffee_lock:
-        _coffee["proc"] = proc
-    log(f"[咖啡] 终端已打开（gnome-terminal PID={proc.pid}）")
+    with _arm_lock:
+        _arm["proc"] = proc
+        _arm["title"] = title
+    log(f"[{name}] 终端已打开（gnome-terminal PID={proc.pid}）")
     rc = proc.wait()
-    with _coffee_lock:
-        _coffee["proc"] = None
-    log(f"[咖啡] 终端窗口已关闭（gnome-terminal 退出码 {rc}）")
+    with _arm_lock:
+        _arm["proc"] = None
+        _arm["title"] = ""
+    log(f"[{name}] 终端窗口已关闭（gnome-terminal 退出码 {rc}）")
 
 
 # 命令词 -> 动作; 顺序即优先级(“关闭”类必须先于“图片”, 否则含“图”会被打开命令截走)
 COMMANDS = [
     (("咖啡",), make_coffee),                     # 给我倒杯咖啡 -> 新终端窗口跑机械臂回放脚本
+    (("水果", "香蕉", "桃子", "桃", "蕉", "banana", "peach"), pick_fruit),  # 夹香蕉/桃子 -> fruit_inference_101.sh
     (("关闭", "关掉", "闭", "收起"), close_image),
     (("图片", "照片", "看图", "图像", "图"), open_newest_image),
 ]
@@ -775,11 +816,14 @@ if __name__ == "__main__":
                     help="关闭大模型兜底: 命令词没匹配上时不问 DeepSeek, 直接播兜底语")
     ap.add_argument("--coffee-script", default=COFFEE_SCRIPT,
                     help="「给我倒杯咖啡」时在终端窗口里执行的机械臂回放脚本")
+    ap.add_argument("--fruit-script", default=FRUIT_SCRIPT,
+                    help="「夹香蕉/夹桃子」时在终端窗口里执行的机械臂推理脚本(按水果传参 banana/peach)")
     ap.add_argument("--wav", help="直接识别已有 WAV(不连硬件), 用于验证")
     a = ap.parse_args()
 
     a.llm = not a.no_llm               # 默认开启: 未命中命令词时交给 DeepSeek 问答
     COFFEE_SCRIPT = a.coffee_script
+    FRUIT_SCRIPT = a.fruit_script
 
     if a.log_file:
         _log_fp = open(a.log_file, "a", encoding="utf-8")
