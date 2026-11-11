@@ -113,10 +113,10 @@ cd m260c-voice-assistant
 export DEEPSEEK_API_KEY=sk-xxxxxxxx      # 或写入当前目录 .deepseek_key 文件
 
 # 启动（带 HUD）
-python voice_command_demo.py --ui --log-file run.log
+python demo/voice_command_demo.py --ui --log-file run.log
 
 # 不带界面
-python voice_command_demo.py
+python demo/voice_command_demo.py
 ```
 
 **使用流程：先说唤醒词「你好宽宽」，听到回应后再说命令。**
@@ -134,14 +134,14 @@ python voice_command_demo.py
 
 ```bash
 # —— 主程序 ——
-python voice_command_demo.py --ui                 # 带 HUD 界面
-python voice_command_demo.py --asr vosk           # 回退 Vosk 识别
-python voice_command_demo.py --no-llm             # 关闭大模型兜底
-python voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
-python voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
-python voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
-python voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
-python voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
+python demo/voice_command_demo.py --ui                 # 带 HUD 界面
+python demo/voice_command_demo.py --asr vosk           # 回退 Vosk 识别
+python demo/voice_command_demo.py --no-llm             # 关闭大模型兜底
+python demo/voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
+python demo/voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
+python demo/voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
+python demo/voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
+python demo/voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
 
 # —— 硬件与协议（无需讯飞账号）——
 python voice_interact_test.py                     # 唤醒→录音→回放 循环测试
@@ -163,7 +163,7 @@ python llm.py "你好"
 
 | 文件 | 职责 | 依赖 |
 |---|---|---|
-| `voice_command_demo.py` | **主程序**：串起下面所有模块（唤醒→识别→执行/问答→播报） | 全部 |
+| `demo/voice_command_demo.py` | **主程序**：串起下面所有模块（唤醒→识别→执行/问答→播报） | 全部 |
 | `mic_serial.py` | 讯飞 XFM-DP 串口协议实现（0xA5 帧 / 握手 / 事件解析 / 下发命令） | 纯标准库 `termios` |
 | `audio_capture.py` | 常开录音 + 1.2s 环形预滚缓冲 | 标准库 + `arecord` |
 | `asr_sensevoice.py` | SenseVoice-Small 离线识别封装（PCM / WAV 两种输入） | `funasr` + ModelScope |
@@ -208,7 +208,7 @@ python llm.py "你好"
 ## 已知限制与注意事项
 
 - **唤醒词在音箱固件里**，改唤醒词走串口命令（`voice_interact_test.py --set-wakeword "..."`），**改完需拔插音箱**才生效。
-- 目标板内唤醒词出厂为「小微小微」，本仓库当前配置为「你好宽宽」，用前请与设备实际值对齐（见 `voice_command_demo.py: WAKE_WORD_TEXT`）。
+- 目标板内唤醒词出厂为「小微小微」，本仓库当前配置为「你好宽宽」，用前请与设备实际值对齐（见 `demo/voice_command_demo.py: WAKE_WORD_TEXT`）。
 - **咖啡任务依赖外部工作区**：默认脚本路径 `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh`（B601 从臂数据回放，需自备数据集与 CAN 环境）需自行准备，用 `--coffee-script` 可替换。
 - **水果抓取任务依赖外部工作区**：默认脚本路径 `FRUIT_SCRIPT = /home/kf/LX/pai0/tool/101_single/fruit_inference_101.sh`（SO-101 单臂 ACT 抓取，按水果传参 `banana`/`peach`，需自备权重）需自行准备，用 `--fruit-script` 可替换；水果推理默认带 **120 秒兜底超时**（`--fruit-duration`，0=不限），避免无限推理。
 - **机械臂任务只是"半闭环"**：脚本结束时按退出码播报「完成/异常」，但**不判断是否真的夹到**（无视觉/夹爪检测）。详见 `notes/05-命令与咖啡任务.md` 第 6 节。

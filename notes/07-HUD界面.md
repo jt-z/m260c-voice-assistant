@@ -111,7 +111,7 @@ Qt 组件只能在主线程更新，所以：
 运行方式（`--ui`）：
 
 ```python
-# voice_command_demo.py: run_with_ui()
+# demo/voice_command_demo.py: run_with_ui()
 worker = threading.Thread(target=run_live, args=(args, rec), daemon=True)
 worker.start()
 _ui.on_close(lambda: _stop.set())
@@ -162,7 +162,7 @@ sudo apt install libxcb-cursor0
 sound_radar_hud.py 30
 
 # 主程序带界面
-voice_command_demo.py --ui
+demo/voice_command_demo.py --ui
 ```
 
 **如何在没有显示器时验证渲染**（避免"没测就说好了"）：

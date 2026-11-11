@@ -117,10 +117,10 @@ cd m260c-voice-assistant
 export DEEPSEEK_API_KEY=sk-xxxxxxxx      # or put it in a .deepseek_key file
 
 # Run with the HUD
-python voice_command_demo.py --ui --log-file run.log
+python demo/voice_command_demo.py --ui --log-file run.log
 
 # Run headless (no UI)
-python voice_command_demo.py
+python demo/voice_command_demo.py
 ```
 
 **How to use: say the wake word「你好宽宽」first, then your command.**
@@ -138,14 +138,14 @@ python voice_command_demo.py
 
 ```bash
 # —— main program ——
-python voice_command_demo.py --ui                 # with HUD
-python voice_command_demo.py --asr vosk           # use Vosk instead
-python voice_command_demo.py --no-llm             # disable the LLM fallback
-python voice_command_demo.py --duration 5         # record 5s after wake (default 3)
-python voice_command_demo.py --wav a.wav          # recognize an existing WAV (no hardware)
-python voice_command_demo.py --coffee-script /path/x.sh   # use another coffee-task script
-python voice_command_demo.py --fruit-script /path/x.sh    # use another fruit-grasp script
-python voice_command_demo.py --fruit-duration 0           # fruit-inference timeout in seconds, 0 = unlimited (default 120)
+python demo/voice_command_demo.py --ui                 # with HUD
+python demo/voice_command_demo.py --asr vosk           # use Vosk instead
+python demo/voice_command_demo.py --no-llm             # disable the LLM fallback
+python demo/voice_command_demo.py --duration 5         # record 5s after wake (default 3)
+python demo/voice_command_demo.py --wav a.wav          # recognize an existing WAV (no hardware)
+python demo/voice_command_demo.py --coffee-script /path/x.sh   # use another coffee-task script
+python demo/voice_command_demo.py --fruit-script /path/x.sh    # use another fruit-grasp script
+python demo/voice_command_demo.py --fruit-duration 0           # fruit-inference timeout in seconds, 0 = unlimited (default 120)
 
 # —— hardware / protocol (no iFlytek account needed) ——
 python voice_interact_test.py                     # wake → record → playback loop
@@ -167,7 +167,7 @@ python llm.py "hello"
 
 | File | Responsibility | Dependencies |
 |---|---|---|
-| `voice_command_demo.py` | **Main program**: wires everything together | all |
+| `demo/voice_command_demo.py` | **Main program**: wires everything together | all |
 | `mic_serial.py` | iFlytek XFM-DP serial protocol (0xA5 frames / handshake / events / commands) | stdlib `termios` only |
 | `audio_capture.py` | Always-on capture + 1.2 s ring pre-roll buffer | stdlib + `arecord` |
 | `asr_sensevoice.py` | SenseVoice-Small offline ASR wrapper (PCM or WAV input) | `funasr` + ModelScope |
@@ -214,7 +214,7 @@ Only **source code and docs** are versioned. The following are excluded (see [.g
 - The **wake word lives in the speaker firmware**. Change it over the serial command
   (`voice_interact_test.py --set-wakeword "..."`) — **the speaker must be replugged** for it to take effect.
 - The factory wake word is「小微小微」; this repo is currently configured for「你好宽宽」. Make sure it matches your
-  device (see `voice_command_demo.py: WAKE_WORD_TEXT`).
+  device (see `demo/voice_command_demo.py: WAKE_WORD_TEXT`).
 - The **coffee task depends on an external workspace**: the default script path
   `COFFEE_SCRIPT = /home/kf/LX/pai0/tool/b601_single/replay.sh` (B601 follower data replay; a dataset and CAN setup
   are required) must be prepared separately; use `--coffee-script` to point at your own script.

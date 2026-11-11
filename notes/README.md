@@ -12,13 +12,13 @@ Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形�
 
 ```bash
 # 主程序（推荐用 lerobot conda 环境，里面装好了 funasr / edge-tts / PySide6）
-/home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py --ui
+/home/kf/miniconda3/envs/lerobot/bin/python demo/voice_command_demo.py --ui
 
 # 不带界面
-/home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
+/home/kf/miniconda3/envs/lerobot/bin/python demo/voice_command_demo.py
 
 # 同时落盘日志
-/home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py --ui --log-file run.log
+/home/kf/miniconda3/envs/lerobot/bin/python demo/voice_command_demo.py --ui --log-file run.log
 ```
 
 使用流程：**先说唤醒词「你好宽宽」，再说命令**。
@@ -58,7 +58,7 @@ Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形�
 | `tts.py` | edge-tts → ffmpeg → paplay，带缓存与重试 | `edge-tts` + `ffmpeg` + `paplay` |
 | `llm.py` | DeepSeek 问答（OpenAI 兼容 HTTP API） | `requests` |
 | `sound_radar_hud.py` | PySide6 HUD：雷达 + 瀑布图 + 状态 + 日志 | `PySide6` |
-| `voice_command_demo.py` | **主程序**：串起上面所有模块 | 全部 |
+| `demo/voice_command_demo.py` | **主程序**：串起上面所有模块 | 全部 |
 | `voice_interact_test.py` | 硬件测试工具（改唤醒词、查音频路由、录音回放） | 标准库 |
 | `bench_asr.py` | Vosk vs SenseVoice 识别基准对比 | 两者 |
 
@@ -84,14 +84,14 @@ Linux 下通过语音控制 WHEELTEC M260C 智能音箱（讯飞 XFM-DP 环形�
 
 ```bash
 # —— 主程序 ——
-voice_command_demo.py --ui                 # 带 HUD 界面
-voice_command_demo.py --no-llm             # 关掉大模型兜底（只播"暂时还处理不了"）
-voice_command_demo.py --asr vosk           # 退回 Vosk 识别
-voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
-voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
-voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
-voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
-voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
+demo/voice_command_demo.py --ui                 # 带 HUD 界面
+demo/voice_command_demo.py --no-llm             # 关掉大模型兜底（只播"暂时还处理不了"）
+demo/voice_command_demo.py --asr vosk           # 退回 Vosk 识别
+demo/voice_command_demo.py --duration 5         # 唤醒后录音 5 秒（默认 3）
+demo/voice_command_demo.py --wav a.wav          # 直接识别已有录音（不连硬件）
+demo/voice_command_demo.py --coffee-script /path/x.sh   # 换咖啡任务脚本
+demo/voice_command_demo.py --fruit-script /path/x.sh    # 换水果抓取脚本
+demo/voice_command_demo.py --fruit-duration 0           # 水果推理兜底超时(秒), 0=不限(默认 120)
 
 # —— 硬件与协议 ——
 voice_interact_test.py --version           # 查降噪板固件版本
@@ -119,11 +119,11 @@ llm.py "你好"
 | 配置 | 位置 | 当前值 |
 |---|---|---|
 | 唤醒词 | `voice_interact_test.py: WAKE_WORD_TEXT/PINYIN` | 「你好宽宽」/ `ni2 hao3 kuan1 kuan1` |
-| 唤醒后录音时长 | `voice_command_demo.py: --duration` | 3s |
-| 预滚时长 | `voice_command_demo.py: PRE_ROLL_SEC` | 1.2s |
-| 识别引擎 | `voice_command_demo.py: --asr` | SenseVoice (`sv`) |
-| 咖啡脚本 | `voice_command_demo.py: COFFEE_SCRIPT` | `/home/kf/LX/pai0/tool/b601_single/replay.sh` |
-| 兜底提示语 | `voice_command_demo.py: --fallback-say` | 暂时还处理不了 |
+| 唤醒后录音时长 | `demo/voice_command_demo.py: --duration` | 3s |
+| 预滚时长 | `demo/voice_command_demo.py: PRE_ROLL_SEC` | 1.2s |
+| 识别引擎 | `demo/voice_command_demo.py: --asr` | SenseVoice (`sv`) |
+| 咖啡脚本 | `demo/voice_command_demo.py: COFFEE_SCRIPT` | `/home/kf/LX/pai0/tool/b601_single/replay.sh` |
+| 兜底提示语 | `demo/voice_command_demo.py: --fallback-say` | 暂时还处理不了 |
 | 大模型 | `llm.py: MODEL` | `deepseek-v4-flash` |
 | 大模型 key | 环境变量 `DEEPSEEK_API_KEY` 或 `.deepseek_key` 文件 | 已配置 |
 | TTS 音色 | `tts.py: DEFAULT_VOICE` | `zh-CN-XiaoxiaoNeural` |

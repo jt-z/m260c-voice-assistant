@@ -12,7 +12,8 @@ voice_command_demo.py —— 语音命令控制：
       (两个进程抢同一台机械臂危险), 已有在跑时会提示并忽略本次。
 
 大模型兜底(默认开): 命令词都没匹配上时, 把原话交给 DeepSeek 回答并播报(reply 仅播报,
-      不执行任何动作)。key 取 DEEPSEEK_API_KEY 环境变量或本目录 .deepseek_key 文件;
+      不执行任何动作)。key 取 DEEPSEEK_API_KEY 环境变量或仓库根目录 .deepseek_key 文件
+      (llm.py 同目录);
       都没配则为"桩模式"(回一句固定话术), 便于先跑通链路。用 --no-llm 可关闭。
 
 日志: 所有状态带时间戳实时输出, 常用状态提示:
@@ -28,7 +29,7 @@ voice_command_demo.py —— 语音命令控制：
     模型: models/vosk-model-small-cn-0.22 (见 .gitignore 的 models 忽略项)
 
 当前板内唤醒词: 「你好宽宽」(ni2 hao3 kuan1 kuan1);
-改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
+改唤醒词(在仓库根目录执行): python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
 
 用法:
     <lerobot-python> demo/voice_command_demo.py                    # 默认 SenseVoice(实时文本+定稿)
@@ -42,8 +43,8 @@ voice_command_demo.py —— 语音命令控制：
     <lerobot-python> demo/voice_command_demo.py --fruit-script /path/xxx.sh    # 换水果抓取脚本
     <lerobot-python> demo/voice_command_demo.py --fruit-duration 0             # 水果推理设为不限时长(默认 120s 兜底)
     <lerobot-python> demo/voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
-    python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
-    python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
+    python3 bench_asr.py                                      # (仓库根目录) Vosk vs SenseVoice 基准对比
+    python3 sound_radar_hud.py 30                             # (仓库根目录) 只预览 HUD(模拟数据, 不连硬件)
 
 语音命令: 「打开图片」/「关闭图片」/「给我倒杯咖啡」/「夹香蕉」「夹桃子」(跑机械臂脚本, 窗口里 Ctrl+C 中断)
 识别: 默认 SenseVoice 一个引擎负责"界面/终端实时文本 + 最终定稿"(非流式, 用滚动重解码近似实时).
