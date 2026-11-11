@@ -16,16 +16,22 @@ localization_test.py —— M260C 环形六麦声源定位测试
   并把原始样本写入 CSV。
 
 用法:
-  python3 localization_test.py
-  python3 localization_test.py --positions 0,90,180,270 --per-position 10
-  python3 localization_test.py --port /dev/ttyACM0 --csv result.csv
+  python3 voice_angle/localization_test.py
+  python3 voice_angle/localization_test.py --positions 0,90,180,270 --per-position 10
+  python3 voice_angle/localization_test.py --port /dev/ttyACM0 --csv voice_angle/result.csv
+不给 --csv 时, CSV 默认写入本脚本所在目录(voice_angle/), 便于随仓库一起跟踪。
 """
 import argparse
 import csv
 import json
 import math
+import os
+import sys
 import time
 from collections import Counter, defaultdict
+
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_DIR)          # 串口层复用仓库根目录的 mic_serial
 
 from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI, SerialTimeoutError)
 
@@ -162,7 +168,9 @@ def run(args):
     if args.per_position < 1:
         raise SystemExit("--per-position 必须 >= 1")
 
-    csv_path = args.csv or time.strftime("localization_%Y%m%d_%H%M%S.csv")
+    csv_path = args.csv or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        time.strftime("localization_%Y%m%d_%H%M%S.csv"))
     csv_file = open(csv_path, "w", newline="", encoding="utf-8")
     writer = csv.writer(csv_file)
     writer.writerow(["time", "expected_angle", "measured_angle",
@@ -283,5 +291,5 @@ if __name__ == "__main__":
                     help="期望方位列表, 逗号分隔(默认 %s)" % DEFAULT_POSITIONS)
     ap.add_argument("--per-position", type=int, default=5,
                     help="每个方位采集的有效样本数(默认 5)")
-    ap.add_argument("--csv", help="CSV 输出路径(默认 localization_时间戳.csv)")
+    ap.add_argument("--csv", help="CSV 输出路径(默认写入本目录 localization_时间戳.csv)")
     raise SystemExit(run(ap.parse_args()))
