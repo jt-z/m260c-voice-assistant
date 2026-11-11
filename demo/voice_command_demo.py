@@ -24,24 +24,24 @@ voice_command_demo.py —— 语音命令控制：
       因此录音那几秒不再是"盲区"; 若录音期间又听到唤醒, 会明确提示并忽略.
 
 依赖(Vosk 已装在 lerobot conda 环境, 用该环境的 python 运行):
-    /home/kf/miniconda3/envs/lerobot/bin/python voice_command_demo.py
+    /home/kf/miniconda3/envs/lerobot/bin/python demo/voice_command_demo.py
     模型: models/vosk-model-small-cn-0.22 (见 .gitignore 的 models 忽略项)
 
 当前板内唤醒词: 「你好宽宽」(ni2 hao3 kuan1 kuan1);
 改唤醒词: python3 voice_interact_test.py --set-wakeword "..." (改完需拔插音箱)
 
 用法:
-    <lerobot-python> voice_command_demo.py                    # 默认 SenseVoice(实时文本+定稿)
-    <lerobot-python> voice_command_demo.py --ui               # 实时 HUD 界面(PySide6)
-    <lerobot-python> voice_command_demo.py --asr vosk         # 退回仅 Vosk(轻量, 逐段流式)
-    <lerobot-python> voice_command_demo.py --fallback-say "没听懂"   # 自定义兜底播报语(留空关闭)
-    <lerobot-python> voice_command_demo.py --no-llm           # 关闭大模型兜底(只播兜底语)
-    <lerobot-python> voice_command_demo.py --duration 5       # 录音窗口 5 秒
-    <lerobot-python> voice_command_demo.py --log-file run.log # 日志同时落盘
-    <lerobot-python> voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
-    <lerobot-python> voice_command_demo.py --fruit-script /path/xxx.sh    # 换水果抓取脚本
-    <lerobot-python> voice_command_demo.py --fruit-duration 0             # 水果推理设为不限时长(默认 120s 兜底)
-    <lerobot-python> voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
+    <lerobot-python> demo/voice_command_demo.py                    # 默认 SenseVoice(实时文本+定稿)
+    <lerobot-python> demo/voice_command_demo.py --ui               # 实时 HUD 界面(PySide6)
+    <lerobot-python> demo/voice_command_demo.py --asr vosk         # 退回仅 Vosk(轻量, 逐段流式)
+    <lerobot-python> demo/voice_command_demo.py --fallback-say "没听懂"   # 自定义兜底播报语(留空关闭)
+    <lerobot-python> demo/voice_command_demo.py --no-llm           # 关闭大模型兜底(只播兜底语)
+    <lerobot-python> demo/voice_command_demo.py --duration 5       # 录音窗口 5 秒
+    <lerobot-python> demo/voice_command_demo.py --log-file run.log # 日志同时落盘
+    <lerobot-python> demo/voice_command_demo.py --coffee-script /path/xxx.sh   # 换咖啡任务脚本
+    <lerobot-python> demo/voice_command_demo.py --fruit-script /path/xxx.sh    # 换水果抓取脚本
+    <lerobot-python> demo/voice_command_demo.py --fruit-duration 0             # 水果推理设为不限时长(默认 120s 兜底)
+    <lerobot-python> demo/voice_command_demo.py --wav a.wav        # 直接识别已有录音(不连硬件)
     python3 bench_asr.py                                      # Vosk vs SenseVoice 基准对比
     python3 sound_radar_hud.py 30                             # 只预览 HUD(模拟数据, 不连硬件)
 
@@ -64,7 +64,7 @@ import threading
 import time
 import wave
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根目录
 sys.path.insert(0, PROJECT_DIR)
 from mic_serial import (MicSerial, MSG_SHAKE, MSG_AIUI,
                         SerialTimeoutError, pretty_payload)

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # run.sh —— m260c 语音助手启动脚本
-# 激活 lerobot conda 环境并运行 voice_command_demo.py（前台运行，交互式输出）
+# 激活 lerobot conda 环境并运行 demo/voice_command_demo.py（前台运行，交互式输出）
 #
 # 用法:
 #   ./run.sh                      # 交互式菜单，选择启动模式
-#   ./run.sh --ui --log-file run.log   # 直接透传参数给 voice_command_demo.py
+#   ./run.sh --ui --log-file run.log   # 直接透传参数给 demo/voice_command_demo.py
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 CONDA_ENV="lerobot"
-MAIN_SCRIPT="voice_command_demo.py"
+MAIN_SCRIPT="demo/voice_command_demo.py"
 
 # —— 定位 conda 并激活环境 ——
 CONDA_BASE="${CONDA_BASE:-$HOME/miniconda3}"

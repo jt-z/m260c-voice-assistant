@@ -11,7 +11,7 @@ coffee_voice_trigger.py —— 极简版「做咖啡」语音触发器
 不在本进程里自动按键。
 
 运行(需要带 funasr 的 lerobot_b601 环境):
-    /home/jt/dev/miniforge3/envs/lerobot_b601/bin/python coffee_voice_trigger.py
+    /home/jt/dev/miniforge3/envs/lerobot_b601/bin/python demo/coffee_voice_trigger.py
     # 键盘热键: 1 = 播报「正在启动机器臂为您制作咖啡」
     #           2 = 播报「您的咖啡制作完成，请慢用！」
     # 可选: --coffee-dir <脚本目录>   换推理脚本所在目录
@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根目录
 sys.path.insert(0, PROJECT_DIR)
 from audio_capture import AudioCapture
 from mic_serial import MicSerial, MSG_SHAKE, MSG_AIUI
