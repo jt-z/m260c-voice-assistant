@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-bench_asr.py —— Vosk(small) vs SenseVoice 基准对比(同一批真实录音)
+bench_asr.py —— Vosk(small) / SenseVoice / Fun-ASR-Nano 基准对比(同一批真实录音)
 
 说明: audio/*.wav 是你实测时录下的真实音频, 但没有逐条人工标注,
       所以这里用"代理指标"做相对比较(不是绝对准确率):
@@ -9,7 +9,8 @@ bench_asr.py —— Vosk(small) vs SenseVoice 基准对比(同一批真实录音
         3) 无异常重复字   : 是否出现 3 个以上连续相同字符(如 关关关)
         4) 平均耗时       : 单条解码时间
 注意: 录音里含唤醒词(预滚会带入), 所以"文本是否以命令字开头"没有意义, 故不采用.
-用法: <lerobot-python> bench_asr.py [--limit N]
+用法: <lerobot-python> bench_asr.py [--limit N] [--engines vosk,sv,nano]
+      nano = Fun-ASR-Nano-2512(LLM-ASR, ~800M), 首次自动从 ModelScope 下载, GPU 推理
 """
 import argparse
 import glob
@@ -76,6 +77,27 @@ def sv_factory():
     return run
 
 
+# ------------------------------------------------------- Fun-ASR-Nano
+def nano_factory():
+    from funasr import AutoModel
+    model = AutoModel(model="FunAudioLLM/Fun-ASR-Nano-2512",
+                      trust_remote_code=True, remote_code="./model.py",
+                      device="cuda:0", hub="ms", disable_update=True,
+                      log_level="ERROR")
+
+    def run(path):
+        res = model.generate(input=[path], cache={}, batch_size=1,
+                             language="中文", itn=True)
+        t = res[0]["text"] if res else ""
+        return re.sub(r"[，。！？、,.!?\s]", "", t)   # LLM 直接出标点, 无需去标签
+    return run
+
+
+ENGINES = {"vosk": ("Vosk-small", vosk_factory),
+           "sv": ("SenseVoice", sv_factory),
+           "nano": ("FunASR-Nano", nano_factory)}
+
+
 def summarize(name, results, times):
     n = len(results)
     hit = sum(1 for t in results if any(k in t for k in HIT_KEYS))
@@ -92,31 +114,41 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="只用最近 N 条(默认全部)")
     ap.add_argument("--show", type=int, default=12, help="并排展示前 N 条")
+    ap.add_argument("--engines", default="vosk,sv",
+                    help="逗号分隔: vosk,sv,nano(默认 vosk,sv; nano 首次下载约2GB, 走GPU)")
     a = ap.parse_args()
 
     files = wav_files(a.limit or None)
     print(f"样本: {len(files)} 条真实录音\n")
 
-    print("加载 Vosk …")
-    vrun = vosk_factory()
-    print("加载 SenseVoice(首次会从 ModelScope 下载模型)…")
-    srun = sv_factory()
+    selected = [e.strip() for e in a.engines.split(",") if e.strip()]
+    for e in selected:
+        if e not in ENGINES:
+            raise SystemExit(f"未知引擎: {e} (可选: {','.join(ENGINES)})")
 
-    vtext, stext, vtime, stime = [], [], [], []
-    for i, f in enumerate(files, 1):
-        t0 = time.time(); vt = vrun(f); dt_v = time.time() - t0
-        t0 = time.time(); st = srun(f); dt_s = time.time() - t0
-        vtext.append(vt); stext.append(st); vtime.append(dt_v); stime.append(dt_s)
-        if i % 10 == 0:
-            print(f"  ...已处理 {i}/{len(files)}")
+    texts, times = {}, {}
+    for key in selected:
+        name, factory = ENGINES[key]
+        print(f"加载 {name} …")
+        run = factory()
+        r_texts, r_times = [], []
+        for i, f in enumerate(files, 1):
+            t0 = time.time(); txt = run(f); dt = time.time() - t0
+            r_texts.append(txt); r_times.append(dt)
+            if i % 10 == 0:
+                print(f"  ...{name} 已处理 {i}/{len(files)}")
+        texts[name], times[name] = r_texts, r_times
 
     print("\n=== 汇总(代理指标, 同一批样本对比) ===")
-    summarize("Vosk-small", vtext, vtime)
-    summarize("SenseVoice", stext, stime)
+    for key in selected:
+        name = ENGINES[key][0]
+        summarize(name, texts[name], times[name])
 
     print(f"\n=== 并排样本(最近 {min(a.show, len(files))} 条) ===")
-    for f, vt, st in list(zip(files, vtext, stext))[-a.show:]:
-        print(f"{os.path.basename(f)[-15:]}  Vosk: {vt or '(空)':<16} | SV: {st or '(空)'}")
+    names = [ENGINES[k][0] for k in selected]
+    for idx in range(max(0, len(files) - a.show), len(files)):
+        row = " | ".join(f"{n}: {texts[n][idx] or '(空)'}" for n in names)
+        print(f"{os.path.basename(files[idx])[-15:]}  {row}")
 
 
 if __name__ == "__main__":
